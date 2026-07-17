@@ -1,0 +1,23 @@
+{
+  "name": "ai-personal-backend",
+  "version": "1.0.0",
+  "description": "Backend for personal AI assistant",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "nodemon server.js"
+  },
+  "dependencies": {
+    "@google/generative-ai": "^0.24.1",
+    "better-sqlite3": "^11.0.0",
+    "cors": "^2.8.5",
+    "dotenv": "^17.4.2",
+    "express": "^4.21.0",
+    "groq-sdk": "^1.3.0",
+    "ollama": "^0.5.0",
+    "openai": "^6.48.0"
+  },
+  "devDependencies": {
+    "nodemon": "^3.1.14"
+  }
+}

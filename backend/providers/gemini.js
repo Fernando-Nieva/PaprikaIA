@@ -3,7 +3,7 @@ const { GoogleGenerativeAI } = require('@google/generative-ai');
 class GeminiProvider {
   constructor(apiKey, model) {
     this.genAI = new GoogleGenerativeAI(apiKey);
-    this.modelName = model || 'gemini-1.5-flash';
+    this.modelName = model || 'gemini-2.0-flash';
   }
 
   async chat(messages, onChunk) {

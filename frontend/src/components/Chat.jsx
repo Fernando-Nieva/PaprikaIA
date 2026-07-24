@@ -1,4 +1,4 @@
-import { useState, useRef, useEffect } from 'react'
+import { useState, useRef, useEffect, useCallback } from 'react'
 
 const API = `http://${window.location.hostname}:3001/api`
 
@@ -10,6 +10,11 @@ export default function Chat() {
   const [loading, setLoading] = useState(false)
   const [sidebarOpen, setSidebarOpen] = useState(false)
   const messagesEndRef = useRef(null)
+  const consoleEndRef = useRef(null)
+
+  const [userInfo, setUserInfo] = useState(null)
+  const [processLog, setProcessLog] = useState([])
+  const [toolStatus, setToolStatus] = useState(null)
 
   useEffect(() => {
     fetchConversations()
@@ -18,6 +23,22 @@ export default function Chat() {
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' })
   }, [messages])
+
+  useEffect(() => {
+    consoleEndRef.current?.scrollIntoView({ behavior: 'smooth' })
+  }, [processLog])
+
+  const fetchUserInfo = useCallback(async () => {
+    try {
+      const res = await fetch(`${API}/user/default/info`)
+      const data = await res.json()
+      setUserInfo(data)
+    } catch {}
+  }, [])
+
+  useEffect(() => {
+    fetchUserInfo()
+  }, [fetchUserInfo, messages])
 
   async function fetchConversations() {
     const res = await fetch(`${API}/conversations`)
@@ -75,6 +96,7 @@ export default function Chat() {
     setMessages(prev => [...prev, userMsg])
     setInput('')
     setLoading(true)
+    setProcessLog([])
 
     try {
       const res = await fetch(`${API}/conversations/${conv.id}/messages`, {
@@ -86,7 +108,6 @@ export default function Chat() {
       const reader = res.body.getReader()
       const decoder = new TextDecoder()
       let assistantMsg = ''
-      let toolMsg = ''
 
       while (true) {
         const { done, value } = await reader.read()
@@ -97,6 +118,10 @@ export default function Chat() {
 
         for (const line of lines) {
           const data = JSON.parse(line.slice(6))
+
+          if (data.type === 'process') {
+            setProcessLog(prev => [...prev, { step: data.step, detail: data.detail, ts: data.ts }])
+          }
 
           if (data.type === 'text') {
             assistantMsg += data.content
@@ -113,27 +138,19 @@ export default function Chat() {
           }
 
           if (data.type === 'tool') {
-            toolMsg += data.content
-            setMessages(prev => {
-              const msgs = [...prev]
-              const last = msgs[msgs.length - 1]
-              if (last?.role === 'tool') {
-                last.content = toolMsg
-              } else {
-                msgs.push({ role: 'tool', content: toolMsg })
-              }
-              return [...msgs]
-            })
+            setToolStatus(data.content.trim())
           }
         }
       }
 
       fetchConversations()
+      fetchUserInfo()
     } catch (err) {
       console.error(err)
     }
 
     setLoading(false)
+    setTimeout(() => setToolStatus(null), 2000)
   }
 
   function handleKeyDown(e) {
@@ -143,10 +160,15 @@ export default function Chat() {
     }
   }
 
+  const memoryCategories = userInfo?.memories ? groupByCategory(userInfo.memories) : {}
+  const emotions = userInfo?.emotions || {}
+  const relationship = userInfo?.relationship || {}
+
   return (
     <div className="app">
       <div className={`sidebar-overlay ${sidebarOpen ? 'visible' : ''}`} onClick={() => setSidebarOpen(false)} />
 
+      {/* Sidebar izquierdo: conversaciones */}
       <div className={`sidebar ${sidebarOpen ? 'open' : ''}`}>
         <div className="sidebar-header">
           <h2>Paprika</h2>
@@ -171,41 +193,142 @@ export default function Chat() {
         </div>
       </div>
 
+      {/* Panel izquierdo: info que Paprika guarda */}
+      <div className="info-panel">
+        <div className="info-panel-header">
+          <h3>Lo que Paprika sabe</h3>
+        </div>
+        <div className="info-panel-body">
+
+          {userInfo?.stats && (
+            <div className="info-section">
+              <div className="stats-grid">
+                <div className="stat"><span className="stat-num">{userInfo.stats.totalMemories}</span><span className="stat-label">Recuerdos</span></div>
+                <div className="stat"><span className="stat-num">{userInfo.stats.personalData}</span><span className="stat-label">Personales</span></div>
+                <div className="stat"><span className="stat-num">{userInfo.stats.preferences}</span><span className="stat-label">Preferencias</span></div>
+                <div className="stat"><span className="stat-num">{userInfo.stats.experiences}</span><span className="stat-label">Experiencias</span></div>
+              </div>
+            </div>
+          )}
+
+          {relationship.trust !== undefined && (
+            <div className="info-section">
+              <h4>Relación</h4>
+              <div className="bar-row"><span>Confianza</span><div className="bar"><div className="bar-fill trust" style={{ width: `${(relationship.trust || 0) * 100}%` }} /></div></div>
+              <div className="bar-row"><span>Familiaridad</span><div className="bar"><div className="bar-fill trust" style={{ width: `${(relationship.familiarity || 0) * 100}%` }} /></div></div>
+              <div className="bar-row"><span>Formalidad</span><div className="bar"><div className="bar-fill" style={{ width: `${(relationship.formality || 0) * 100}%` }} /></div></div>
+              <p className="info-detail">Conversaciones: {relationship.conversationCount || 0}</p>
+              {relationship.description && <p className="info-desc">{relationship.description}</p>}
+            </div>
+          )}
+
+          {Object.keys(emotions).length > 0 && (
+            <div className="info-section">
+              <h4>Emociones</h4>
+              {Object.entries(emotions).filter(([,v]) => typeof v === 'number').sort((a, b) => b[1] - a[1]).slice(0, 5).map(([key, val]) => (
+                <div key={key} className="bar-row"><span>{key}</span><div className="bar"><div className="bar-fill emotion" style={{ width: `${val * 100}%` }} /></div></div>
+              ))}
+            </div>
+          )}
+
+          {Object.entries(memoryCategories).map(([cat, mems]) => (
+            <div key={cat} className="info-section">
+              <h4>{categoryLabel(cat)} ({mems.length})</h4>
+              {mems.slice(0, 4).map((m, i) => (
+                <div key={i} className="mem-item">{m.content}</div>
+              ))}
+              {mems.length > 4 && <p className="info-more">+{mems.length - 4} más</p>}
+            </div>
+          ))}
+
+          {userInfo?.knowledge?.length > 0 && (
+            <div className="info-section">
+              <h4>Conocimiento ({userInfo.knowledge.length})</h4>
+              {userInfo.knowledge.slice(0, 6).map((e, i) => (
+                <div key={i} className="mem-item">{e.name} <span className="mem-tag">[{e.type}]</span></div>
+              ))}
+            </div>
+          )}
+
+          {userInfo?.goals?.length > 0 && (
+            <div className="info-section">
+              <h4>Objetivos ({userInfo.goals.length})</h4>
+              {userInfo.goals.map((g, i) => (
+                <div key={i} className="mem-item">{g.content} ({Math.round((g.progress || 0) * 100)}%)</div>
+              ))}
+            </div>
+          )}
+
+        </div>
+      </div>
+
+      {/* Zona central: chat + consola abajo */}
       <div className="main">
         <button className="menu-btn" onClick={() => setSidebarOpen(!sidebarOpen)}>
           ☰
         </button>
 
-        {!activeConv ? (
-          <div className="welcome-screen">
-            <h1>Paprika</h1>
-            <p>Tu asistente IA personal</p>
-            <div className="tools-info">
-              <span className="tool-badge">📄 Leer archivos</span>
-              <span className="tool-badge">✏️ Escribir código</span>
-              <span className="tool-badge">💻 Terminal</span>
-            </div>
-          </div>
-        ) : (
-          <div className="messages-container">
-            {messages.map((msg, i) => (
-              <div key={i} className={`message ${msg.role}`}>
-                <div className="message-role">
-                  {msg.role === 'user' ? 'Tú' : msg.role === 'tool' ? '🔧 Herramienta' : 'Paprika'}
-                </div>
-                {msg.content}
-              </div>
-            ))}
-            {loading && messages[messages.length - 1]?.role !== 'assistant' && (
-              <div className="message assistant">
-                <div className="message-role">Paprika</div>
-                Pensando...
-              </div>
-            )}
-            <div ref={messagesEndRef} />
+        {/* Tool status overlay — top-left */}
+        {toolStatus && (
+          <div className="tool-status-overlay">
+            {toolStatus}
           </div>
         )}
 
+        {/* Chat arriba */}
+        <div className="chat-area">
+          {!activeConv ? (
+            <div className="welcome-screen">
+              <h1>Paprika</h1>
+              <p>Tu asistente IA personal</p>
+              <div className="tools-info">
+                <span className="tool-badge">📄 Leer archivos</span>
+                <span className="tool-badge">✏️ Escribir código</span>
+                <span className="tool-badge">💻 Terminal</span>
+              </div>
+            </div>
+          ) : (
+            <div className="messages-container">
+              {messages.filter(m => m.role !== 'tool').map((msg, i) => (
+                <div key={i} className={`message ${msg.role}`}>
+                  <div className="message-role">
+                    {msg.role === 'user' ? 'Tú' : 'Paprika'}
+                  </div>
+                  {msg.content}
+                </div>
+              ))}
+              {loading && messages[messages.length - 1]?.role !== 'assistant' && (
+                <div className="message assistant">
+                  <div className="message-role">Paprika</div>
+                  Pensando...
+                </div>
+              )}
+              <div ref={messagesEndRef} />
+            </div>
+          )}
+        </div>
+
+        {/* Consola de procesos abajo */}
+        <div className="process-console">
+          <div className="console-header">
+            <span className="console-title">⚙️ Pipeline</span>
+            {loading && <span className="console-spinner" />}
+          </div>
+          <div className="console-body">
+            {processLog.map((log, i) => (
+              <div key={i} className="console-line">
+                <span className="console-step">{log.step}</span>
+                <span className="console-detail">{log.detail}</span>
+              </div>
+            ))}
+            {processLog.length === 0 && (
+              <div className="console-empty">Esperando mensaje...</div>
+            )}
+            <div ref={consoleEndRef} />
+          </div>
+        </div>
+
+        {/* Input abajo del todo */}
         <div className="input-container">
           <div className="input-wrapper">
             <textarea
@@ -228,4 +351,29 @@ export default function Chat() {
       </div>
     </div>
   )
+}
+
+function groupByCategory(memories) {
+  const groups = {}
+  for (const m of memories) {
+    const cat = m.category || 'other'
+    if (!groups[cat]) groups[cat] = []
+    groups[cat].push(m)
+  }
+  return groups
+}
+
+function categoryLabel(cat) {
+  const labels = {
+    personal_data: 'Datos Personales',
+    preference: 'Preferencias',
+    experience: 'Experiencias',
+    person: 'Personas',
+    relationship: 'Relaciones',
+    project: 'Proyectos',
+    goal: 'Objetivos',
+    event: 'Eventos',
+    date: 'Fechas',
+  }
+  return labels[cat] || cat
 }

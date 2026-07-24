@@ -1,65 +1,53 @@
 const config = require('./config.json');
-const { getTools, getToolByName } = require('./tools');
 const { getAvailableProviders } = require('./providers');
 
-function buildSystemPrompt() {
-  const toolsInfo = getTools().map(t =>
-    `- ${t.function.name}: ${t.function.description}. Parámetros: ${JSON.stringify(t.function.parameters.properties)}`
-  ).join('\n\n');
+const PROVIDER_TIMEOUT_MS = parseInt(process.env.PAPRIKA_PROVIDER_TIMEOUT_MS, 10) || 60000;
 
+/**
+ * Construye el system prompt legacy desde config.json.
+ * Se usa como fallback cuando el Personality Engine no está disponible.
+ */
+function buildSystemPrompt() {
   return `Eres ${config.name}. ${config.personality}
 
 Tus gustos: ${config.gustos.join(', ')}
 
 Reglas:
-${config.reglas.map(r => `- ${r}`).join('\n')}
-
-HERRAMIENTAS DISPONIBLES (USALAS SIEMPRE QUE NECESITES VERIFICAR ALGO EN EL SISTEMA):
-${toolsInfo}
-
-INSTRUCCIONES IMPORTANTES SOBRE HERRAMIENTAS:
-- SIEMPRE usá las herramientas antes de afirmar o negar algo sobre archivos/directorios
-- Si el usuario te pide algo que involucra archivos, PRIMERO usá list_files para ver qué hay en la carpeta del proyecto
-- Para ver archivos: usá list_files con path "" para ver la raíz de la carpeta del proyecto
-- Para leer un archivo: usá read_file con la ruta relativa a la carpeta del proyecto
-- Para escribir: usá write_file
-- Para comandos del sistema: usá run_command
-- NO asumas que algo no existe sin antes verificarlo con una herramienta
-- Cuando uses una herramienta, explicá brevemente qué estás haciendo
-
-Ejemplo: si te dicen "abrí el archivo X", primero usá list_files para ver si existe, y después read_file para leerlo.`;
+${config.reglas.map(r => `- ${r}`).join('\n')}`;
 }
 
-function detectToolFromText(text) {
-  const lower = text.toLowerCase();
+/**
+ * Función de chat con fallback entre proveedores.
+ *
+ * @param {Array} messages - Mensajes de la conversación
+ * @param {Function} onChunk - Callback para streaming (chunk, type)
+ * @param {Object} options - Opciones opcionales
+ * @param {string} options.systemPrompt - System prompt personalizado (reemplaza el legacy)
+ * @returns {Promise<string>} Respuesta completa
+ */
+async function chat(messages, onChunk, options = {}) {
+  // Si se provee un system prompt personalizado, usarlo
+  // Si no, verificar si el primer mensaje ya es un system message
+  const hasSystemMessage = messages.length > 0 && messages[0].role === 'system';
 
-  if (lower.includes('no existe') || lower.includes('no encuentro') || lower.includes('no hay') || lower.includes('no está')) {
-    const pathMatch = text.match(/["'`\/\\]([A-Za-z0-9_.\-\/\\ ]+\.\w+)["'`]/);
-    if (pathMatch) {
-      return { name: 'read_file', args: { path: pathMatch[1].trim() } };
-    }
+  let allMessages;
+  if (options.systemPrompt) {
+    // System prompt personalizado del Personality Engine (ya incluye tools del pipeline)
+    allMessages = [
+      { role: 'system', content: options.systemPrompt },
+      ...messages.filter(m => m.role !== 'system')
+    ];
+  } else if (hasSystemMessage) {
+    // Ya hay un system message en los mensajes, no agregar otro
+    allMessages = [...messages];
+  } else {
+    // Fallback: system prompt legacy
+    const systemPrompt = buildSystemPrompt();
+    allMessages = [
+      { role: 'system', content: systemPrompt },
+      ...messages
+    ];
   }
-
-  if (lower.includes('creame el archivo') || lower.includes('creá el archivo') || lower.includes('escribe en') || lower.includes('guarda esto')) {
-    const pathMatch = text.match(/(?:archivo|en|archivo)\s+["'`\/\\]([A-Za-z0-9_.\-\/\\ ]+)["'`]/i);
-    if (pathMatch) {
-      return { name: 'list_files', args: { path: '' } };
-    }
-  }
-
-  if (lower.includes('qué hay en') || lower.includes('que hay en') || lower.includes('cuáles son los archivos') || lower.includes('cuales son los archivos') || lower.includes('mostrar archivos') || lower.includes('ver archivos')) {
-    return { name: 'list_files', args: { path: '' } };
-  }
-
-  return null;
-}
-
-async function chat(messages, onChunk) {
-  const systemPrompt = buildSystemPrompt();
-  const allMessages = [
-    { role: 'system', content: systemPrompt },
-    ...messages
-  ];
 
   const providers = getAvailableProviders();
 
@@ -72,7 +60,13 @@ async function chat(messages, onChunk) {
   for (const { name, provider } of providers) {
     try {
       if (onChunk) onChunk(`\n🔄 Usando: ${name}\n`, 'tool');
-      const response = await provider.chat(allMessages, onChunk);
+
+      const response = await Promise.race([
+        provider.chat(allMessages, onChunk),
+        new Promise((_, reject) =>
+          setTimeout(() => reject(new Error(`Timeout: ${name} no respondió en ${PROVIDER_TIMEOUT_MS / 1000}s`)), PROVIDER_TIMEOUT_MS)
+        ),
+      ]);
       return response;
     } catch (err) {
       lastError = err;

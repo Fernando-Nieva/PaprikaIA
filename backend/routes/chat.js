@@ -3,6 +3,12 @@ const router = express.Router();
 const db = require('../db');
 const { chat } = require('../ollama');
 
+let core = null;
+
+function setupRoutes(paprikaCore) {
+  core = paprikaCore;
+}
+
 router.get('/conversations', (req, res) => {
   res.json(db.getConversations());
 });
@@ -27,12 +33,6 @@ router.post('/conversations/:id/messages', async (req, res) => {
 
   db.addMessage(conversationId, 'user', content);
 
-  const history = db.getMessages(conversationId);
-  const messages = history.map(m => ({
-    role: m.role,
-    content: m.content
-  }));
-
   res.setHeader('Content-Type', 'text/event-stream');
   res.setHeader('Cache-Control', 'no-cache');
   res.setHeader('Connection', 'keep-alive');
@@ -40,14 +40,40 @@ router.post('/conversations/:id/messages', async (req, res) => {
   let fullResponse = '';
 
   try {
-    await chat(messages, (chunk, type) => {
-      if (type === 'text') {
-        fullResponse += chunk;
-        res.write(`data: ${JSON.stringify({ type: 'text', content: chunk })}\n\n`);
-      } else if (type === 'tool') {
-        res.write(`data: ${JSON.stringify({ type: 'tool', content: chunk })}\n\n`);
-      }
-    });
+    if (core) {
+      // Paprika Core pipeline: pasa por analyzer → emotions → memory → context → provider → response processor
+      const result = await core.processMessage({
+        message: content,
+        conversationId,
+        userId: 'default',
+        getHistory: () => db.getMessages(conversationId),
+        chatFn: chat,
+        onChunk: (chunk, type) => {
+          if (type === 'text') {
+            fullResponse += chunk;
+            res.write(`data: ${JSON.stringify({ type: 'text', content: chunk })}\n\n`);
+          } else if (type === 'tool') {
+            res.write(`data: ${JSON.stringify({ type: 'tool', content: chunk })}\n\n`);
+          }
+        },
+        onProcess: (proc) => {
+          res.write(`data: ${JSON.stringify({ type: 'process', ...proc })}\n\n`);
+        }
+      });
+      fullResponse = result.response;
+    } else {
+      // Fallback: sistema actual directo (si Core no está inicializado)
+      const history = db.getMessages(conversationId);
+      const messages = history.map(m => ({ role: m.role, content: m.content }));
+      await chat(messages, (chunk, type) => {
+        if (type === 'text') {
+          fullResponse += chunk;
+          res.write(`data: ${JSON.stringify({ type: 'text', content: chunk })}\n\n`);
+        } else if (type === 'tool') {
+          res.write(`data: ${JSON.stringify({ type: 'tool', content: chunk })}\n\n`);
+        }
+      });
+    }
 
     db.addMessage(conversationId, 'assistant', fullResponse);
 
@@ -66,4 +92,4 @@ router.post('/conversations/:id/messages', async (req, res) => {
   res.end();
 });
 
-module.exports = router;
+module.exports = { router, setupRoutes };

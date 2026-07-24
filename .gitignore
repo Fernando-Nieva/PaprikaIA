@@ -31,3 +31,12 @@ build/
 
 # Misc
 *.txt
+
+# Local ML cache
+backend/local_cache/
+
+# Test files
+backend/test_*.js
+
+# Admin
+carpeta_administrativa

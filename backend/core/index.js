@@ -100,6 +100,11 @@ const PromptComposer = require('./prompt');
 const SelfAccess = require('./self');
 const ToolExecutor = require('./tools');
 const MemoryTelemetry = require('./observability');
+const { SearchManager } = require('./web');
+const CodeExecutor = require('./executor');
+const { AgenticLoop } = require('./agentic');
+const MediaManager = require('./multimodal/MediaManager');
+const STTProvider = require('./multimodal/STTProvider');
 
 const DEFAULT_SLEEP_THRESHOLD = 10;
 
@@ -186,8 +191,55 @@ class PaprikaCore {
       knowledge: this.knowledge,
     });
 
+    // ─── SearchManager — búsqueda web externa (SearXNG) ───
+    this.searchManager = new SearchManager();
+    this.searchManager.init().catch(err => {
+      console.warn(`   ⚠ SearchManager: no disponible (${err.message || 'init failed'})`);
+    });
+
+    // ─── CodeExecutor — ejecución segura de código JavaScript ───
+    this.codeExecutor = new CodeExecutor({ timeout: 5000 });
+
     // ─── ToolExecutor — herramientas de sistema para Paprika ───
-    this.tools = new ToolExecutor({ baseDir: path.join(__dirname, '..') });
+    this.tools = new ToolExecutor({
+      baseDir: path.join(__dirname, '..'),
+      searchManager: this.searchManager,
+      codeExecutor: this.codeExecutor,
+    });
+
+    // ─── Multimodal — upload, images, audio ───
+    this.media = new MediaManager(database, {
+      uploadDir: path.join(__dirname, '../uploads'),
+    });
+    this.media.init().catch(err => {
+      console.warn(`   ⚠ MediaManager init failed: ${err.message}`);
+    });
+
+    // ─── STT (speech-to-text) si API key configurada ───
+    this.stt = null;
+    if (process.env.GROQ_API_KEY) {
+      this.stt = new STTProvider({
+        provider: 'groq',
+        apiKey: process.env.GROQ_API_KEY,
+      });
+    } else if (process.env.OPENAI_API_KEY) {
+      this.stt = new STTProvider({
+        provider: 'openai',
+        apiKey: process.env.OPENAI_API_KEY,
+      });
+    }
+
+    // ─── AgenticLoop — factory para ciclo PRAL por request ───
+    this._agenticLoopConfig = {
+      toolExecutor: this.tools,
+      config: {
+        maxIterations: 10,
+        maxToolsPerRound: 5,
+        absoluteTimeout: 60000,
+        enablePlanning: true,
+        enableReflection: true,
+      },
+    };
 
     // ─── Pipeline (sin módulos de maintenance — esos son del SleepCycle) ───
     this.pipeline = new Pipeline({
@@ -216,6 +268,9 @@ class PaprikaCore {
       selfAccess: this.selfAccess,
       tools: this.tools,
       telemetry: this.telemetry,
+      createAgenticLoop: () => new AgenticLoop(this._agenticLoopConfig),
+      mediaManager: this.media,
+      sttProvider: this.stt,
     });
 
     // ─── Sleep Cycle: conversation counter + async trigger ───
@@ -246,8 +301,13 @@ class PaprikaCore {
     console.log('   ✓ ConflictResolver: activo (4 conflict types, auto-resolve)');
     console.log('   ✓ PromptComposer: activo (12 sections, token budget)');
     console.log('   ✓ SelfAccess: activo (estado interno accesible)');
-    console.log('   ✓ ToolExecutor: activo (10 herramientas de sistema)');
+    console.log('   ✓ ToolExecutor: activo (13 herramientas de sistema + web + código)');
+    console.log('   ✓ SearchManager: activo (búsqueda web via SearXNG)');
+    console.log('   ✓ CodeExecutor: activo (sandbox aislado, 5s timeout)');
+    console.log('   ✓ AgenticLoop: activo (PRAL cycle, planning + reflection)');
     console.log('   ✓ MemoryTelemetry: activo (trazas, métricas, logs estructurados)');
+    console.log('   ✓ MediaManager: activo (upload, images, audio)');
+    console.log('   ✓ STTProvider: activo (' + (this.stt ? this.stt.provider : 'no API key') + ')');
     console.log(`   ⏱ Sleep threshold: cada ${this._sleepThreshold} conversaciones`);
 
     // Backfill de embeddings para memorias existentes sin embedding
@@ -291,14 +351,16 @@ class PaprikaCore {
    * @param {Function} params.onChunk - Callback para streaming
    * @returns {Promise<Object>} { response, metadata }
    */
-  async processMessage({ message, conversationId, userId, getHistory, chatFn, onChunk }) {
+  async processMessage({ message, conversationId, userId, getHistory, chatFn, onChunk, onProcess, attachments }) {
     const result = await this.pipeline.execute({
       message,
       conversationId,
       userId,
       getHistory,
       chatFn,
-      onChunk
+      onChunk,
+      onProcess,
+      attachments
     });
 
     // Fire-and-forget: check if sleep cycle should run

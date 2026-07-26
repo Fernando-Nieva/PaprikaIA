@@ -394,7 +394,7 @@ class MessageAnalyzer {
     if (intent === 'greeting' || intent === 'farewell') return false;
 
     // No recordar confirmaciones simples
-    if (/^(ok|dale|bien|genial| Perfecto|jaja|jeje|xd|👍|❤|😂)$/i.test(message)) return false;
+    if (/^(ok|dale|bien|genial|Perfecto|jaja|jeje|xd|👍|❤|😂)$/i.test(message)) return false;
 
     // Recordar si hay alta importancia
     for (const pattern of IMPORTANCE_PATTERNS.high) {

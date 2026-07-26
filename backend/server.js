@@ -1,20 +1,28 @@
 const express = require('express');
 const cors = require('cors');
+const path = require('path');
 const { router: chatRoutes, setupRoutes } = require('./routes/chat');
 const { router: userRoutes, setupUserRoutes } = require('./routes/user');
+const createUploadRouter = require('./routes/upload');
 const db = require('./db');
 const createCore = require('./core');
 
 const app = express();
 const PORT = 3001;
 
+// ─── Middleware global (CORS, JSON) ANTES de todas las rutas ───
+app.use(cors());
+app.use(express.json());
+
 // Inicializar Paprika Core (Fase 1 — stubs activos)
 const core = createCore(db);
 setupRoutes(core);
 setupUserRoutes(core);
 
-app.use(cors());
-app.use(express.json());
+// ─── Upload routes ───
+const uploadRouter = createUploadRouter(core.media);
+app.use('/api/upload', uploadRouter);
+
 app.use('/api', chatRoutes);
 app.use('/api', userRoutes);
 

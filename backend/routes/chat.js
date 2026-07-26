@@ -29,13 +29,19 @@ router.get('/conversations/:id/messages', (req, res) => {
 
 router.post('/conversations/:id/messages', async (req, res) => {
   const conversationId = parseInt(req.params.id);
-  const { content } = req.body;
+  const { content, attachments } = req.body;
 
-  db.addMessage(conversationId, 'user', content);
+  db.addMessage(conversationId, 'user', content, null, JSON.stringify(attachments || []));
 
   res.setHeader('Content-Type', 'text/event-stream');
   res.setHeader('Cache-Control', 'no-cache');
   res.setHeader('Connection', 'keep-alive');
+
+  const safeWrite = (data) => {
+    if (!res.destroyed && !req.aborted) {
+      try { res.write(data); } catch {}
+    }
+  };
 
   let fullResponse = '';
 
@@ -48,16 +54,17 @@ router.post('/conversations/:id/messages', async (req, res) => {
         userId: 'default',
         getHistory: () => db.getMessages(conversationId),
         chatFn: chat,
+        attachments: attachments || [],
         onChunk: (chunk, type) => {
           if (type === 'text') {
             fullResponse += chunk;
-            res.write(`data: ${JSON.stringify({ type: 'text', content: chunk })}\n\n`);
+            safeWrite(`data: ${JSON.stringify({ type: 'text', content: chunk })}\n\n`);
           } else if (type === 'tool') {
-            res.write(`data: ${JSON.stringify({ type: 'tool', content: chunk })}\n\n`);
+            safeWrite(`data: ${JSON.stringify({ type: 'tool', content: chunk })}\n\n`);
           }
         },
         onProcess: (proc) => {
-          res.write(`data: ${JSON.stringify({ type: 'process', ...proc })}\n\n`);
+          safeWrite(`data: ${JSON.stringify({ type: 'process', ...proc })}\n\n`);
         }
       });
       fullResponse = result.response;
@@ -68,9 +75,9 @@ router.post('/conversations/:id/messages', async (req, res) => {
       await chat(messages, (chunk, type) => {
         if (type === 'text') {
           fullResponse += chunk;
-          res.write(`data: ${JSON.stringify({ type: 'text', content: chunk })}\n\n`);
+          safeWrite(`data: ${JSON.stringify({ type: 'text', content: chunk })}\n\n`);
         } else if (type === 'tool') {
-          res.write(`data: ${JSON.stringify({ type: 'tool', content: chunk })}\n\n`);
+          safeWrite(`data: ${JSON.stringify({ type: 'tool', content: chunk })}\n\n`);
         }
       });
     }
@@ -84,9 +91,9 @@ router.post('/conversations/:id/messages', async (req, res) => {
       db.updateConversationTitle(conversationId, shortTitle);
     }
 
-    res.write(`data: ${JSON.stringify({ type: 'done' })}\n\n`);
+    safeWrite(`data: ${JSON.stringify({ type: 'done' })}\n\n`);
   } catch (err) {
-    res.write(`data: ${JSON.stringify({ type: 'error', content: err.message })}\n\n`);
+    safeWrite(`data: ${JSON.stringify({ type: 'error', content: err.message })}\n\n`);
   }
 
   res.end();

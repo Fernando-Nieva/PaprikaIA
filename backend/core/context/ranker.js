@@ -662,19 +662,19 @@ class ContextRanker {
     const memContent = (memory.content || '').toLowerCase();
     let boost = 0;
 
-    if (relationship.sensitiveTopics) {
-      for (const topic of relationship.sensitiveTopics) {
+    if (relationship.favoriteTopics) {
+      for (const topic of relationship.favoriteTopics) {
         if (memContent.includes(topic.toLowerCase())) {
-          boost = relationship.trustLevel > 0.5 ? 0.3 : -0.3;
+          boost = 0.5;
           break;
         }
       }
     }
 
-    if (relationship.favoriteTopics) {
-      for (const topic of relationship.favoriteTopics) {
+    if (boost === 0 && relationship.sensitiveTopics) {
+      for (const topic of relationship.sensitiveTopics) {
         if (memContent.includes(topic.toLowerCase())) {
-          boost = 0.5;
+          boost = relationship.trustLevel > 0.5 ? 0.3 : -0.3;
           break;
         }
       }

@@ -28,8 +28,15 @@ class ResponseProcessor {
    * @returns {string} Respuesta procesada
    */
   process({ rawResponse, analysis, emotionalState }) {
-    // Fase 1: retornar sin modificar
-    return rawResponse;
+    if (!rawResponse || typeof rawResponse !== 'string') return rawResponse;
+
+    // Strip any residual [TOOL:name({...})] markers
+    let cleaned = rawResponse.replace(/\[TOOL:\w+\(\{.+?\}\)\]/g, '').trim();
+
+    // Collapse multiple blank lines
+    cleaned = cleaned.replace(/\n{3,}/g, '\n\n');
+
+    return cleaned || rawResponse;
 
     // Fase 8: validaciones y correcciones
     // const issues = this._detectIssues(rawResponse, analysis, emotionalState);

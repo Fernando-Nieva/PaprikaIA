@@ -418,7 +418,7 @@ class GoalEngine {
       { pattern: /no\s+pud(?:é|e|o)/i, delta: -0.1, signal: 'no pudo' },
       { pattern: /me\s+trab(?:é|e|o)/i, delta: -0.1, signal: ' trabó' },
       { pattern: /no\s+avanc(?:é|e|o)/i, delta: -0.05, signal: 'no avanzó' },
-      { pattern: /me\s+estoy\s+(?: frustrando|enojando)/i, delta: -0.15, signal: 'frustración' },
+      { pattern: /me\s+estoy\s+(?:frustrando|enojando)/i, delta: -0.15, signal: 'frustración' },
       { pattern: /no\s+(?:entiendo|comprendo)/i, delta: -0.1, signal: 'no entiende' },
       { pattern: /es\s+(?:muy\s+difícil|complicado)/i, delta: -0.05, signal: 'dificultad' },
     ];

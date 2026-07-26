@@ -1,6 +1,60 @@
 import { useState, useRef, useEffect, useCallback } from 'react'
+import ReactMarkdown from 'react-markdown'
+import useFileUpload from '../hooks/useFileUpload'
 
 const API = `http://${window.location.hostname}:3001/api`
+
+function extractYouTubeId(url) {
+  if (!url) return null
+  const patterns = [
+    /(?:youtube\.com\/watch\?v=)([a-zA-Z0-9_-]{11})/,
+    /(?:youtu\.be\/)([a-zA-Z0-9_-]{11})/,
+    /(?:youtube\.com\/embed\/)([a-zA-Z0-9_-]{11})/,
+    /(?:youtube\.com\/v\/)([a-zA-Z0-9_-]{11})/,
+  ]
+  for (const p of patterns) {
+    const m = url.match(p)
+    if (m) return m[1]
+  }
+  return null
+}
+
+function MarkdownRenderer({ content }) {
+  return (
+    <ReactMarkdown
+      components={{
+        a: ({ href, children }) => {
+          const ytId = extractYouTubeId(href)
+          if (ytId) {
+            return (
+              <span className="youtube-preview">
+                <a href={href} target="_blank" rel="noopener noreferrer" className="youtube-link">
+                  <img
+                    src={`https://img.youtube.com/vi/${ytId}/mqdefault.jpg`}
+                    alt={typeof children === 'string' ? children : 'Video'}
+                    className="youtube-thumbnail"
+                    loading="lazy"
+                  />
+                  <span className="youtube-play">&#9654;</span>
+                </a>
+                <a href={href} target="_blank" rel="noopener noreferrer" className="youtube-title">
+                  {children}
+                </a>
+              </span>
+            )
+          }
+          return (
+            <a href={href} target="_blank" rel="noopener noreferrer">
+              {children}
+            </a>
+          )
+        },
+      }}
+    >
+      {content}
+    </ReactMarkdown>
+  )
+}
 
 export default function Chat() {
   const [conversations, setConversations] = useState([])
@@ -11,10 +65,16 @@ export default function Chat() {
   const [sidebarOpen, setSidebarOpen] = useState(false)
   const messagesEndRef = useRef(null)
   const consoleEndRef = useRef(null)
+  const inputWrapperRef = useRef(null)
+  const [dragOver, setDragOver] = useState(false)
 
   const [userInfo, setUserInfo] = useState(null)
   const [processLog, setProcessLog] = useState([])
   const [toolStatus, setToolStatus] = useState(null)
+
+  const [expandedImage, setExpandedImage] = useState(null)
+
+  const fileUpload = useFileUpload()
 
   useEffect(() => {
     fetchConversations()
@@ -63,7 +123,11 @@ export default function Chat() {
     setActiveConv(conv)
     const res = await fetch(`${API}/conversations/${conv.id}/messages`)
     const msgs = await res.json()
-    setMessages(msgs.map(m => ({ role: m.role, content: m.content })))
+    setMessages(msgs.map(m => ({
+      role: m.role,
+      content: m.content,
+      attachments: m.attachments || undefined,
+    })))
     setSidebarOpen(false)
   }
 
@@ -78,31 +142,47 @@ export default function Chat() {
   }
 
   async function sendMessage() {
-    if (!input.trim() || loading) return
+    if ((!input.trim() && !fileUpload.hasAttachments) || loading) return
 
     let conv = activeConv
     if (!conv) {
       const res = await fetch(`${API}/conversations`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ title: input.substring(0, 40) })
+        body: JSON.stringify({ title: input.substring(0, 40) || 'Mensaje con archivo' })
       })
       conv = await res.json()
       setActiveConv(conv)
       setConversations(prev => [conv, ...prev])
     }
 
-    const userMsg = { role: 'user', content: input }
+    let attachments = undefined
+    if (fileUpload.hasAttachments) {
+      attachments = await fileUpload.prepareAttachments()
+    }
+
+    const userMsg = {
+      role: 'user',
+      content: input,
+      attachments: attachments?.length > 0 ? attachments : undefined,
+    }
     setMessages(prev => [...prev, userMsg])
+    const sentInput = input
     setInput('')
     setLoading(true)
     setProcessLog([])
+    fileUpload.clearPreviews()
 
     try {
+      const body = { content: sentInput }
+      if (attachments?.length > 0) {
+        body.attachments = attachments
+      }
+
       const res = await fetch(`${API}/conversations/${conv.id}/messages`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ content: userMsg.content })
+        body: JSON.stringify(body)
       })
 
       const reader = res.body.getReader()
@@ -157,6 +237,30 @@ export default function Chat() {
     if (e.key === 'Enter' && !e.shiftKey) {
       e.preventDefault()
       sendMessage()
+    }
+  }
+
+  function handleWrapperDrop(e) {
+    fileUpload.handleDrop(e)
+    setDragOver(false)
+  }
+
+  function handleWrapperDragOver(e) {
+    e.preventDefault()
+    setDragOver(true)
+  }
+
+  function handleWrapperDragLeave(e) {
+    if (!inputWrapperRef.current?.contains(e.relatedTarget)) {
+      setDragOver(false)
+    }
+  }
+
+  function handleWrapperPaste(e) {
+    if (!e.clipboardData?.items?.length) return
+    const hasFiles = Array.from(e.clipboardData.items).some(i => i.kind === 'file')
+    if (hasFiles) {
+      fileUpload.handlePaste(e)
     }
   }
 
@@ -285,6 +389,8 @@ export default function Chat() {
                 <span className="tool-badge">📄 Leer archivos</span>
                 <span className="tool-badge">✏️ Escribir código</span>
                 <span className="tool-badge">💻 Terminal</span>
+                <span className="tool-badge">🖼️ Imágenes</span>
+                <span className="tool-badge">🎤 Audio</span>
               </div>
             </div>
           ) : (
@@ -294,7 +400,14 @@ export default function Chat() {
                   <div className="message-role">
                     {msg.role === 'user' ? 'Tú' : 'Paprika'}
                   </div>
-                  {msg.content}
+                  {msg.attachments && msg.attachments.length > 0 && (
+                    <MessageAttachments attachments={msg.attachments} onImageClick={setExpandedImage} />
+                  )}
+                  {msg.role === 'assistant' ? (
+                    <MarkdownRenderer content={msg.content} />
+                  ) : (
+                    msg.content
+                  )}
                 </div>
               ))}
               {loading && messages[messages.length - 1]?.role !== 'assistant' && (
@@ -330,25 +443,119 @@ export default function Chat() {
 
         {/* Input abajo del todo */}
         <div className="input-container">
-          <div className="input-wrapper">
-            <textarea
-              className="chat-input"
-              value={input}
-              onChange={(e) => setInput(e.target.value)}
-              onKeyDown={handleKeyDown}
-              placeholder="Escribe un mensaje..."
-              rows={1}
+          <div
+            ref={inputWrapperRef}
+            className={`input-wrapper ${dragOver ? 'drag-over' : ''}`}
+            onDrop={handleWrapperDrop}
+            onDragOver={handleWrapperDragOver}
+            onDragLeave={handleWrapperDragLeave}
+            onPaste={handleWrapperPaste}
+          >
+            <input
+              ref={fileUpload.fileInputRef}
+              type="file"
+              className="file-input-hidden"
+              accept="image/jpeg,image/png,image/gif,image/webp,audio/mpeg,audio/wav,audio/ogg,audio/webm,audio/mp4"
+              multiple
+              onChange={fileUpload.handleFileInputChange}
             />
+            <button
+              className="attach-btn"
+              onClick={fileUpload.triggerFileInput}
+              disabled={loading}
+              title="Adjuntar archivo"
+            >
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                <path d="M21.44 11.05l-9.19 9.19a6 6 0 01-8.49-8.49l9.19-9.19a4 4 0 015.66 5.66l-9.2 9.19a2 2 0 01-2.83-2.83l8.49-8.48" />
+              </svg>
+            </button>
+            <div className="input-text-area">
+              <textarea
+                className="chat-input"
+                value={input}
+                onChange={(e) => setInput(e.target.value)}
+                onKeyDown={handleKeyDown}
+                placeholder={dragOver ? "Soltar archivos aquí..." : "Escribe un mensaje..."}
+                rows={1}
+              />
+            </div>
             <button
               className="send-btn"
               onClick={sendMessage}
-              disabled={loading || !input.trim()}
+              disabled={loading || (!input.trim() && !fileUpload.hasAttachments)}
             >
               {loading ? '...' : 'Enviar'}
             </button>
           </div>
+
+          {fileUpload.hasAttachments && (
+            <div className="attachments-preview-bar">
+              {fileUpload.previews.map(preview => (
+                <div key={preview.id} className="attachment-thumb">
+                  {preview.type.startsWith('image/') ? (
+                    <img src={preview.url} alt={preview.name} className="attachment-thumb-img" />
+                  ) : (
+                    <div className="attachment-thumb-audio">
+                      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                        <path d="M9 18V5l12-2v13" />
+                        <circle cx="6" cy="18" r="3" />
+                        <circle cx="18" cy="16" r="3" />
+                      </svg>
+                    </div>
+                  )}
+                  <span className="attachment-thumb-name" title={preview.name}>
+                    {preview.name.length > 12 ? preview.name.substring(0, 10) + '...' : preview.name}
+                  </span>
+                  <button
+                    className="attachment-thumb-remove"
+                    onClick={() => fileUpload.removePreview(preview.id)}
+                    title="Eliminar"
+                  >
+                    ×
+                  </button>
+                </div>
+              ))}
+            </div>
+          )}
         </div>
       </div>
+
+      {/* Image expansion modal */}
+      {expandedImage && (
+        <div className="image-modal-overlay" onClick={() => setExpandedImage(null)}>
+          <div className="image-modal" onClick={e => e.stopPropagation()}>
+            <button className="image-modal-close" onClick={() => setExpandedImage(null)}>×</button>
+            <img src={expandedImage} alt="Expandida" className="image-modal-img" />
+          </div>
+        </div>
+      )}
+    </div>
+  )
+}
+
+function MessageAttachments({ attachments, onImageClick }) {
+  return (
+    <div className="message-attachments">
+      {attachments.map((att, i) => {
+        if (att.mimeType?.startsWith('image/') && att.base64) {
+          const src = `data:${att.mimeType};base64,${att.base64}`
+          return (
+            <div key={i} className="msg-attachment msg-attachment-image" onClick={() => onImageClick(src)}>
+              <img src={src} alt={att.filename || 'Imagen'} />
+            </div>
+          )
+        }
+        if (att.mimeType?.startsWith('audio/') && att.base64) {
+          const src = `data:${att.mimeType};base64,${att.base64}`
+          return (
+            <div key={i} className="msg-attachment msg-attachment-audio">
+              <audio controls src={src} className="msg-audio-player" />
+              <span className="msg-audio-filename">{att.filename}</span>
+            </div>
+          )
+        }
+        return null
+      })}
     </div>
   )
 }

@@ -36,7 +36,10 @@ build/
 backend/local_cache/
 
 # Test files
-backend/test_*.js
+backend/test*.js
+
+# SearXNG
+searxng/
 
 # Admin
 carpeta_administrativa

@@ -259,6 +259,7 @@ class GraphRetriever {
           if (!visited.has(neighborId)) {
             visited.add(neighborId);
             nextFrontier.push(neighborId);
+            resultEntities.push({ id: neighborId });
 
             resultRelations.push({
               source_id: rel.source_entity_id,

@@ -4,6 +4,7 @@ const path = require('path');
 const db = new Database(path.join(__dirname, 'data.db'));
 
 db.pragma('journal_mode = WAL');
+db.pragma('foreign_keys = ON');
 
 // ─── Column sets: avoid SELECT * everywhere ───
 const MEMORY_CORE = 'id, user_id, type, content, importance, confidence, created_at, last_accessed, access_count, decay_factor, source_conversation_id, last_verified, mentions, confidence_history, reason, semantic_cluster_id, temporal_type';
@@ -178,6 +179,20 @@ db.exec(`
     elapsed_ms INTEGER,
     created_at DATETIME DEFAULT CURRENT_TIMESTAMP
   );
+
+  -- Paprika Multimodal: media uploads
+  CREATE TABLE IF NOT EXISTS media (
+    id TEXT PRIMARY KEY,
+    user_id TEXT NOT NULL,
+    type TEXT NOT NULL,
+    filename TEXT NOT NULL,
+    mime_type TEXT NOT NULL,
+    size INTEGER NOT NULL,
+    path TEXT NOT NULL,
+    thumbnail_path TEXT,
+    metadata TEXT,
+    created_at TEXT DEFAULT (datetime('now'))
+  );
 `);
 
 // ─── Paprika Phase 4: Safe column migration ───
@@ -226,6 +241,10 @@ addColumnIfNotExists('knowledge_entities', 'importance', 'REAL DEFAULT 0.5');
 addColumnIfNotExists('knowledge_entities', 'frequency', 'INTEGER DEFAULT 1');
 addColumnIfNotExists('knowledge_entities', 'emotional_weight', 'REAL DEFAULT 0.0');
 addColumnIfNotExists('knowledge_entities', 'last_mentioned', 'DATETIME');
+
+// ─── Paprika Multimodal: attachments column on messages ───
+
+addColumnIfNotExists('messages', 'attachments', "TEXT");
 
 // ─── Paprika Knowledge Graph v2: Relation temporal + weights ───
 
@@ -328,6 +347,10 @@ db.exec(`
 
   -- memory_sleep_log: latest log per user (composite for ORDER BY)
   CREATE INDEX IF NOT EXISTS idx_memory_sleep_log_user_time ON memory_sleep_log(user_id, created_at DESC);
+
+  -- media: user lookups + type filter
+  CREATE INDEX IF NOT EXISTS idx_media_user ON media(user_id);
+  CREATE INDEX IF NOT EXISTS idx_media_type ON media(type);
 `);
 
 // ─── FTS5 Full-Text Search for memories ───
@@ -377,8 +400,8 @@ module.exports = {
     return db.prepare('SELECT id, role, content, tool_name, created_at FROM messages WHERE conversation_id = ? ORDER BY created_at ASC').all(conversationId);
   },
 
-  addMessage(conversationId, role, content, toolName = null) {
-    db.prepare('INSERT INTO messages (conversation_id, role, content, tool_name) VALUES (?, ?, ?, ?)').run(conversationId, role, content, toolName);
+  addMessage(conversationId, role, content, toolName = null, attachments = null) {
+    db.prepare('INSERT INTO messages (conversation_id, role, content, tool_name, attachments) VALUES (?, ?, ?, ?, ?)').run(conversationId, role, content, toolName, attachments);
     db.prepare('UPDATE conversations SET updated_at = CURRENT_TIMESTAMP WHERE id = ?').run(conversationId);
   },
 
@@ -801,7 +824,12 @@ module.exports = {
       WHERE user_id = ?
       ORDER BY priority DESC, last_mentioned DESC
       LIMIT ?
-    `).all(userId, limit);
+    `).all(userId, limit).map(row => ({
+      ...row,
+      milestones: JSON.parse(row.milestones || '[]'),
+      relatedEntities: JSON.parse(row.related_entities || '[]'),
+      relatedMemories: JSON.parse(row.related_memories || '[]'),
+    }));
   },
 
   getGoalById(goalId) {

@@ -272,6 +272,7 @@ class EmotionEngine {
    * Asegura que un valor esté dentro del rango [0, 1].
    */
   _clamp(value, min = 0, max = 1) {
+    if (Number.isNaN(value)) return min;
     return Math.max(min, Math.min(max, value));
   }
 

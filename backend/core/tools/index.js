@@ -23,9 +23,35 @@
 const fs = require('fs').promises;
 const fsSync = require('fs');
 const path = require('path');
-const { execSync } = require('child_process');
+const { exec } = require('child_process');
 
 const BASE_DIR = path.join(__dirname, '..', '..');
+
+// Web tools (lazy loaded to avoid circular deps)
+let _webTools = null;
+function _getWebTools() {
+  if (!_webTools) {
+    try {
+      _webTools = require('../web');
+    } catch {
+      // Web module not available — tools won't be registered
+    }
+  }
+  return _webTools;
+}
+
+// Code executor (lazy loaded)
+let _codeTools = null;
+function _getCodeTools() {
+  if (!_codeTools) {
+    try {
+      _codeTools = require('../executor/tool');
+    } catch {
+      // Executor module not available
+    }
+  }
+  return _codeTools;
+}
 
 // Maximum output size for tool results (chars)
 const MAX_OUTPUT = 8000;
@@ -34,6 +60,8 @@ class ToolExecutor {
   constructor(config) {
     this.baseDir = (config && config.baseDir) || BASE_DIR;
     this.maxOutput = (config && config.maxOutput) || MAX_OUTPUT;
+    this.searchManager = (config && config.searchManager) || null;
+    this.codeExecutor = (config && config.codeExecutor) || null;
     this._registerTools();
   }
 
@@ -94,6 +122,23 @@ class ToolExecutor {
         execute: async (args) => this._appendFile(args.path, args.content),
       },
     };
+
+    // Register web tools if SearchManager is available
+    if (this.searchManager) {
+      const web = _getWebTools();
+      if (web && web.createWebSearchTool && web.createWebFetchTool) {
+        this.tools.web_search = web.createWebSearchTool(this.searchManager);
+        this.tools.web_fetch = web.createWebFetchTool();
+      }
+    }
+
+    // Register code execution tool if CodeExecutor is available
+    if (this.codeExecutor) {
+      const codeTools = _getCodeTools();
+      if (codeTools && codeTools.createRunCodeTool) {
+        this.tools.run_code = codeTools.createRunCodeTool(this.codeExecutor);
+      }
+    }
   }
 
   // ─────────────────────────────────────────────
@@ -112,7 +157,10 @@ class ToolExecutor {
       return `- ${name}(${params}): ${tool.description}`;
     });
 
-    return `HERRAMIENTAS DISPONIBLES (USALAS cuando necesites ver/crear/modificar archivos o ejecutar comandos):
+    const webToolsAvailable = this.tools.web_search && this.tools.web_fetch;
+    const codeToolsAvailable = this.tools.run_code;
+
+    return `HERRAMIENTAS DISPONIBLES (USALAS cuando necesités ver/crear/modificar archivos, ejecutar comandos${webToolsAvailable ? ', buscar en internet' : ''}${codeToolsAvailable ? ', o ejecutar código JavaScript' : ''}):
 ${lines.join('\n')}
 
 FORMATO DE LLAMADA: poné la llamada así en tu respuesta:
@@ -124,9 +172,14 @@ EJEMPLOS:
 - [TOOL:search_content({pattern: "class.*Engine", dir: "backend/core", include: "*.js"})]
 - [TOOL:write_file({path: "notas.txt", content: "Hola mundo"})]
 - [TOOL:run_command({command: "node -v"})]
+- [TOOL:web_search({query: "últimas noticias node.js"})]
+- [TOOL:web_fetch({url: "https://nodejs.org"})]
+- [TOOL:run_code({code: "return Math.PI * 2;"})]
 
-REGLAS:
+REGLAS OBLIGATORIAS:
 - SIEMPRE usá herramientas antes de afirmar algo sobre archivos/directorios
+- Si el usuario pide UN VIDEO, MÚSICA, NOTICIAS, CLIMA, PRECIOS, TUTORIALES, o cualquier cosa de internet: DEBÉS usar web_search PRIMERO. NO podés responder sin buscar.
+- Si el usuario pregunta algo que necesita información actualizada: DEBÉS usar web_search
 - Podés usar múltiples herramientas en una respuesta
 - El resultado de la herramienta aparecerá como [TOOL_RESULT:...]
 - Explicá brevemente qué hacés antes de cada llamada`;
@@ -244,7 +297,7 @@ REGLAS:
       return `Error: no se encontró el texto buscado en ${filePath}`;
     }
 
-    content = content.replace(oldText, newText);
+    content = content.split(oldText).join(newText);
     await fs.writeFile(fullPath, content, 'utf-8');
     return `Archivo editado: ${filePath}`;
   }
@@ -266,10 +319,11 @@ REGLAS:
     const baseDir = this._resolvePath(dir || '');
     this._assertInsideBase(baseDir);
 
-    // Simple glob implementation
+    // Simple glob implementation with regex escaping
     const results = [];
+    const escaped = pattern.replace(/[.+^${}()|[\]\\]/g, '\\$&');
     const regex = new RegExp(
-      '^' + pattern.replace(/\*/g, '.*').replace(/\?/g, '.') + '$'
+      '^' + escaped.replace(/\*/g, '.*').replace(/\?/g, '.') + '$'
     );
 
     const walk = async (currentDir) => {
@@ -294,7 +348,12 @@ REGLAS:
     const searchDir = this._resolvePath(dir || '');
     this._assertInsideBase(searchDir);
 
-    const regex = new RegExp(pattern, 'gi');
+    let regex;
+    try {
+      regex = new RegExp(pattern, 'gi');
+    } catch (e) {
+      return `Error: expresión regular inválida: ${e.message}`;
+    }
     const includeFilter = include
       ? new RegExp('^' + include.replace(/\*/g, '.*').replace(/\?/g, '.') + '$')
       : null;
@@ -319,10 +378,10 @@ REGLAS:
             const content = await fs.readFile(fullPath, 'utf-8');
             const lines = content.split('\n');
             for (let i = 0; i < lines.length; i++) {
+              regex.lastIndex = 0;
               if (regex.test(lines[i])) {
                 const relPath = path.relative(this.baseDir, fullPath);
                 results.push(`${relPath}:${i + 1}: ${lines[i].trim().substring(0, 120)}`);
-                regex.lastIndex = 0;
                 if (results.length >= MAX_RESULTS) break;
               }
             }
@@ -359,17 +418,24 @@ REGLAS:
   }
 
   async _runCommand(command) {
-    try {
-      const output = execSync(command, {
+    const BLOCKED = /\b(rm\s+-rf|del\s+\/[qsf]|format\s+[a-z]:|shutdown|reboot|taskkill|rd\s+\/s|cipher\s+\/w|curl\s+.*\|\s*sh|wget\s+.*\|\s*sh)\b/i;
+    if (BLOCKED.test(command)) {
+      return 'Error: comando bloqueado por políticas de seguridad';
+    }
+    return new Promise((resolve) => {
+      exec(command, {
         encoding: 'utf-8',
         timeout: 30000,
         cwd: this.baseDir,
         maxBuffer: 1024 * 1024,
+      }, (error, stdout, stderr) => {
+        if (error) {
+          resolve(`Error: ${stderr || error.message}`);
+        } else {
+          resolve(stdout || 'Comando ejecutado sin salida');
+        }
       });
-      return output || 'Comando ejecutado sin salida';
-    } catch (err) {
-      return `Error: ${err.stderr || err.message}`;
-    }
+    });
   }
 
   async _createDir(dirPath) {

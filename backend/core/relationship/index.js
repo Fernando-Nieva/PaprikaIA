@@ -359,7 +359,7 @@ class RelationshipEngine {
     let target = 0.5; // neutral pull
 
     const { intent, emotionalState, topic, intensity } = analysis;
-    const { valence, arousal, dominant } = emotionalState;
+    const { valence = 0, arousal = 0.5, dominant = null } = emotionalState || {};
 
     // ── Trust increases ──
 
@@ -423,7 +423,7 @@ class RelationshipEngine {
   _calculateFamiliarityDelta(analysis) {
     let delta = 0.01; // Base increment per interaction
 
-    const lower = analysis.rawMessage.toLowerCase();
+    const lower = (analysis.rawMessage || '').toLowerCase();
 
     // User uses name or nickname references
     if (/paprika/i.test(lower) || /\bche\b/.test(lower)) {
@@ -473,8 +473,8 @@ class RelationshipEngine {
   _calculateHumorDelta(analysis, response) {
     let target = 0.5; // neutral pull
 
-    const lower = analysis.rawMessage.toLowerCase();
-    const { emotionalState } = analysis;
+    const lower = (analysis.rawMessage || '').toLowerCase();
+    const emotionalState = analysis.emotionalState || {};
 
     // ── Humor increases ──
 
@@ -536,9 +536,8 @@ class RelationshipEngine {
   _calculateOpennessDelta(analysis) {
     let target = 0.5;
 
-    const { intent, emotionalState, intensity } = analysis;
-
-    // ── Openness increases ──
+    const { intent, intensity } = analysis;
+    const emotionalState = analysis.emotionalState || {};
 
     // Direct emotion expression
     if (intent === 'emotion') {
@@ -592,11 +591,12 @@ class RelationshipEngine {
    * @param {Object} analysis - Message analysis
    */
   _detectSensitiveTopics(rel, analysis) {
-    const { emotionalState, intensity, topic } = analysis;
-    const lower = analysis.rawMessage.toLowerCase();
+    const { intensity, topic } = analysis;
+    const emotionalState = analysis.emotionalState || {};
+    const lower = (analysis.rawMessage || '').toLowerCase();
 
     // Explicit avoidance patterns
-    if (SENSITIVE_PATTERNS.some(p => p.test(analysis.rawMessage))) {
+    if (analysis.rawMessage && SENSITIVE_PATTERNS.some(p => p.test(analysis.rawMessage))) {
       if (topic && !rel.sensitiveTopics.includes(topic)) {
         rel.sensitiveTopics.push(topic);
       }
@@ -636,7 +636,8 @@ class RelationshipEngine {
    * @param {Object} analysis - Message analysis
    */
   _detectFavoriteTopics(rel, analysis) {
-    const { emotionalState, intensity, topic } = analysis;
+    const { intensity, topic } = analysis;
+    const emotionalState = analysis.emotionalState || {};
 
     if (!topic) return;
 
@@ -683,7 +684,7 @@ class RelationshipEngine {
    * @param {Object} analysis - Message analysis
    */
   _detectInsideJokes(userId, rel, analysis) {
-    const lower = analysis.rawMessage.toLowerCase();
+    const lower = (analysis.rawMessage || '').toLowerCase();
 
     // Callback patterns: user references past shared moments
     const callbackPatterns = [
@@ -699,14 +700,14 @@ class RelationshipEngine {
       /lo\s+que\s+dijiste/i
     ];
 
-    const isCallback = callbackPatterns.some(p => p.test(analysis.rawMessage));
+    const isCallback = analysis.rawMessage && callbackPatterns.some(p => p.test(analysis.rawMessage));
     const hasHumor = HUMOR_MARKERS.some(m => lower.includes(m));
 
     if (isCallback && hasHumor) {
       // User is referencing a past shared humorous moment
       // Create a simplified joke entry (not a full conversation replay)
       const jokeKey = `callback_${Date.now()}`;
-      const jokeText = `Recuerdo compartido del usuario: "${analysis.rawMessage.substring(0, 80)}"`;
+      const jokeText = `Recuerdo compartido del usuario: "${(analysis.rawMessage || '').substring(0, 80)}"`;
 
       if (!rel.insideJokes.some(j => j === jokeText)) {
         rel.insideJokes.push(jokeText);
@@ -737,7 +738,7 @@ class RelationshipEngine {
    */
   _detectFormality(analysis) {
     let formality = 0.5; // neutral
-    const lower = analysis.rawMessage.toLowerCase();
+    const lower = (analysis.rawMessage || '').toLowerCase();
 
     // Formal markers increase formality
     let formalCount = 0;

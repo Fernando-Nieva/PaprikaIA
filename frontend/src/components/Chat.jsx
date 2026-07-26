@@ -1,6 +1,7 @@
 import { useState, useRef, useEffect, useCallback } from 'react'
 import ReactMarkdown from 'react-markdown'
 import useFileUpload from '../hooks/useFileUpload'
+import { AttachmentRenderer } from './rich'
 
 const API = `http://${window.location.hostname}:3001/api`
 
@@ -188,6 +189,7 @@ export default function Chat() {
       const reader = res.body.getReader()
       const decoder = new TextDecoder()
       let assistantMsg = ''
+      let assistantAttachments = []
 
       while (true) {
         const { done, value } = await reader.read()
@@ -210,8 +212,26 @@ export default function Chat() {
               const last = msgs[msgs.length - 1]
               if (last?.role === 'assistant') {
                 last.content = assistantMsg
+                if (assistantAttachments.length > 0) last.attachments = assistantAttachments
               } else {
-                msgs.push({ role: 'assistant', content: assistantMsg })
+                msgs.push({
+                  role: 'assistant',
+                  content: assistantMsg,
+                  attachments: assistantAttachments.length > 0 ? [...assistantAttachments] : undefined,
+                })
+              }
+              return [...msgs]
+            })
+          }
+
+          if (data.type === 'attachments') {
+            assistantAttachments = assistantAttachments.concat(data.data || [])
+            // Update the assistant message with attachments
+            setMessages(prev => {
+              const msgs = [...prev]
+              const last = msgs[msgs.length - 1]
+              if (last?.role === 'assistant') {
+                last.attachments = [...assistantAttachments]
               }
               return [...msgs]
             })
@@ -407,6 +427,9 @@ export default function Chat() {
                     <MarkdownRenderer content={msg.content} />
                   ) : (
                     msg.content
+                  )}
+                  {msg.role === 'assistant' && msg.attachments && msg.attachments.length > 0 && (
+                    <AttachmentRenderer attachments={msg.attachments} />
                   )}
                 </div>
               ))}

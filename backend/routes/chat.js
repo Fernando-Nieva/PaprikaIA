@@ -24,7 +24,12 @@ router.delete('/conversations/:id', (req, res) => {
 });
 
 router.get('/conversations/:id/messages', (req, res) => {
-  res.json(db.getMessages(parseInt(req.params.id)));
+  const msgs = db.getMessages(parseInt(req.params.id));
+  // Parse JSON attachments from DB
+  res.json(msgs.map(m => ({
+    ...m,
+    attachments: m.attachments ? (() => { try { return JSON.parse(m.attachments); } catch { return []; } })() : [],
+  })));
 });
 
 router.post('/conversations/:id/messages', async (req, res) => {
@@ -44,6 +49,7 @@ router.post('/conversations/:id/messages', async (req, res) => {
   };
 
   let fullResponse = '';
+  let richAttachments = [];
 
   try {
     if (core) {
@@ -61,6 +67,11 @@ router.post('/conversations/:id/messages', async (req, res) => {
             safeWrite(`data: ${JSON.stringify({ type: 'text', content: chunk })}\n\n`);
           } else if (type === 'tool') {
             safeWrite(`data: ${JSON.stringify({ type: 'tool', content: chunk })}\n\n`);
+          } else if (type === 'attachments') {
+            // Rich content attachments (cards, videos, images, etc.)
+            const atts = Array.isArray(chunk) ? chunk : [];
+            richAttachments = richAttachments.concat(atts);
+            safeWrite(`data: ${JSON.stringify({ type: 'attachments', data: atts })}\n\n`);
           }
         },
         onProcess: (proc) => {
@@ -82,7 +93,7 @@ router.post('/conversations/:id/messages', async (req, res) => {
       });
     }
 
-    db.addMessage(conversationId, 'assistant', fullResponse);
+    db.addMessage(conversationId, 'assistant', fullResponse, null, richAttachments.length > 0 ? JSON.stringify(richAttachments) : null);
 
     const conversations = db.getConversations();
     const conv = conversations.find(c => c.id === conversationId);

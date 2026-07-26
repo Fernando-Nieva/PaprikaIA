@@ -18,6 +18,7 @@ const UrlValidator = require('./security/UrlValidator');
 const SearchCache = require('./cache/SearchCache');
 const ResultRanker = require('./ranking/ResultRanker');
 const { createProvider, listProviders } = require('./providers');
+const AttachmentDetector = require('./rich');
 
 module.exports = {
   SearchManager,
@@ -28,4 +29,5 @@ module.exports = {
   ResultRanker,
   createProvider,
   listProviders,
+  AttachmentDetector,
 };

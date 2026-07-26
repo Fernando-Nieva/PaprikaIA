@@ -67,6 +67,7 @@
 const PipelineCache = require('./cache');
 const MemoryTelemetry = require('./observability');
 const { AgenticLoop } = require('./agentic');
+const AttachmentDetector = require('./web/rich');
 
 /**
  * Default fallback values for each pipeline step.
@@ -559,7 +560,7 @@ class Pipeline {
       rawResponse = agenticResult.response;
       agenticMetadata = agenticResult.metadata;
 
-      // ─── Fallback: búsqueda web directa cuando el usuario pide contenido de internet ───
+      // ─── Fallback: búsqueda web directa + rich content attachments ───
       const NEEDS_WEB = /\b(buscar|busca|buscame|buscá|buscáme|youtube|video|videos|noticias|actualidad|clima|temperatura|precio|cuánto cuesta|reseña|review|opinión|pelicula|serie|anime|música|canción|tutorial|resultado|partido|reddit|twitter|github|stackoverflow|documentacion|docu)\b/i;
       const webSearchUsed = agenticMetadata.toolCalls > 0 && agenticMetadata.fallbackSearch;
       if (NEEDS_WEB.test(message) && !webSearchUsed) {
@@ -570,25 +571,23 @@ class Pipeline {
           if (!sm) {
             console.error('[Pipeline] searchManager no disponible');
           } else {
-            // ─── Limpiar el query: extraer intención real ───
             const cleanQuery = this._extractSearchQuery(message);
             console.log(`[Pipeline] Query original: "${message}" → Limpio: "${cleanQuery}"`);
             const searchResult = await sm.search(cleanQuery, { maxResults: 5 });
             if (searchResult && searchResult.results && searchResult.results.length > 0) {
-              const lines = searchResult.results.map((r, i) => {
-                const ytMatch = r.url.match(/(?:youtube\.com\/watch\?v=|youtu\.be\/)([a-zA-Z0-9_-]{11})/);
-                const ytId = ytMatch ? ytMatch[1] : null;
-                const parts = [`[${i + 1}] ${r.title}`];
-                parts.push(r.url);
-                if (ytId) parts.push(`https://img.youtube.com/vi/${ytId}/mqdefault.jpg`);
-                else if (r.thumbnail) parts.push(r.thumbnail);
-                if (r.snippet) parts.push(r.snippet.substring(0, 200));
-                return parts.join('\n');
-              });
-              rawResponse = `Encontré estos resultados para "${message}":\n\n${lines.join('\n\n')}`;
-              agenticMetadata = { ...agenticMetadata, toolCalls: 1, fallbackSearch: true };
+              // Generate rich content attachments from search results
+              const detector = new AttachmentDetector();
+              const attachments = detector.fromSearchResults(searchResult.results);
+
+              rawResponse = `Encontré estos resultados para "${cleanQuery}":`;
+              agenticMetadata = { ...agenticMetadata, toolCalls: 1, fallbackSearch: true, attachments };
+
+              // Emit attachments as a new SSE event type
+              if (onChunk && attachments.length > 0) {
+                onChunk(attachments, 'attachments');
+              }
             } else {
-              rawResponse = `No encontré resultados para "${message}". Probá con otra búsqueda.`;
+              rawResponse = `No encontré resultados para "${cleanQuery}". Probá con otra búsqueda.`;
             }
           }
         } catch (err) {

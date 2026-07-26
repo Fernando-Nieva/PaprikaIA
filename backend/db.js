@@ -397,7 +397,7 @@ module.exports = {
   },
 
   getMessages(conversationId) {
-    return db.prepare('SELECT id, role, content, tool_name, created_at FROM messages WHERE conversation_id = ? ORDER BY created_at ASC').all(conversationId);
+    return db.prepare('SELECT id, role, content, tool_name, attachments, created_at FROM messages WHERE conversation_id = ? ORDER BY created_at ASC').all(conversationId);
   },
 
   addMessage(conversationId, role, content, toolName = null, attachments = null) {

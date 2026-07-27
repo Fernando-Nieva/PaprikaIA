@@ -68,6 +68,8 @@ const PipelineCache = require('./cache');
 const MemoryTelemetry = require('./observability');
 const { AgenticLoop } = require('./agentic');
 const AttachmentDetector = require('./web/rich');
+const { CapabilityManager, ModelSelector, setupCapabilities, MODEL_CAPABILITIES } = require('./capabilities');
+const DocumentProcessor = require('./multimodal/DocumentProcessor');
 
 /**
  * Default fallback values for each pipeline step.
@@ -140,6 +142,9 @@ class Pipeline {
     this.createAgenticLoop = modules.createAgenticLoop || null;
     this._mediaManager = modules.mediaManager || null;
     this._sttProvider = modules.sttProvider || null;
+    this._capabilityManager = modules.capabilityManager || null;
+    this._modelSelector = modules.modelSelector || null;
+    this._documentProcessor = new DocumentProcessor();
   }
 
   // ─── Error boundary helpers ──────────────────────────────
@@ -155,54 +160,78 @@ class Pipeline {
     const parts = [];
     const imageIds = [];
     const audioIds = [];
+    const documentTexts = [];
+    const warnings = [];
 
     for (const att of attachments) {
-      if (att.id && this._mediaManager) {
-        const base64 = await this._mediaManager.readFileAsBase64(att.id);
-        if (base64) {
-          // Verify ownership
-          const media = this._mediaManager.getMedia(att.id);
-          if (media && media.user_id !== userId) {
-            continue; // Skip files not owned by this user
-          }
-          if (base64.type === 'image') {
-            parts.push({
-              type: 'image_url',
-              image_url: { url: `data:${base64.mimeType};base64,${base64.data}` },
-            });
+      const mime = (att.mimeType || '').toLowerCase();
+
+      // ─── Images ───
+      if (mime.startsWith('image/')) {
+        if (att.id && this._mediaManager) {
+          const base64 = await this._mediaManager.readFileAsBase64(att.id);
+          if (base64) {
+            const media = this._mediaManager.getMedia(att.id);
+            if (media && media.user_id !== userId) continue;
+            parts.push({ type: 'image_url', image_url: { url: `data:${base64.mimeType};base64,${base64.data}` } });
             imageIds.push(att.id);
-          } else if (base64.type === 'audio') {
-            audioIds.push(att.id);
-            if (this._sttProvider) {
-              const transcript = await this._sttProvider.transcribe(base64.data, base64.mimeType);
-              if (transcript) {
-                parts.push({ type: 'text', text: `[Audio transcrito]: ${transcript}` });
-              }
-            }
           }
+        } else if (att.base64) {
+          parts.push({ type: 'image_url', image_url: { url: `data:${att.mimeType};base64,${att.base64}` } });
         }
-      } else if (att.base64) {
-        if (att.mimeType?.startsWith('image/')) {
-          parts.push({
-            type: 'image_url',
-            image_url: { url: `data:${att.mimeType};base64,${att.base64}` },
-          });
-        } else if (att.mimeType?.startsWith('audio/')) {
-          if (this._sttProvider) {
-            const transcript = await this._sttProvider.transcribe(att.base64, att.mimeType);
-            if (transcript) {
-              parts.push({ type: 'text', text: `[Audio transcrito]: ${transcript}` });
-            }
+        continue;
+      }
+
+      // ─── Audio ───
+      if (mime.startsWith('audio/')) {
+        if (att.id) audioIds.push(att.id);
+        const audioData = att.base64 || (att.id && this._mediaManager ? (await this._mediaManager.readFileAsBase64(att.id))?.data : null);
+        if (audioData && this._sttProvider) {
+          try {
+            const transcript = await this._sttProvider.transcribe(audioData, att.mimeType);
+            if (transcript) parts.push({ type: 'text', text: `[Audio transcrito]: ${transcript}` });
+          } catch (err) {
+            warnings.push(`Error transcribiendo audio: ${err.message}`);
           }
+        } else if (audioData) {
+          warnings.push('Audio recibido pero sin transcriptor STT disponible');
+        }
+        continue;
+      }
+
+      // ─── Documents (PDF, DOCX, TXT, MD, CSV, JSON) ───
+      if (this._documentProcessor) {
+        const docResult = await this._documentProcessor.process(att);
+        if (docResult.success && docResult.text) {
+          documentTexts.push({
+            filename: att.filename || docResult.metadata?.type || 'documento',
+            text: docResult.text,
+            type: docResult.metadata?.type || 'unknown',
+          });
+        } else if (docResult.error) {
+          warnings.push(docResult.error);
         }
       }
+    }
+
+    // Inject document texts as context
+    if (documentTexts.length > 0) {
+      const docContext = documentTexts.map(d =>
+        `[Documento: ${d.filename}]\n${d.text}`
+      ).join('\n\n');
+      parts.push({ type: 'text', text: `Contenido de archivos adjuntos:\n\n${docContext}` });
+    }
+
+    // Add warnings
+    if (warnings.length > 0) {
+      parts.push({ type: 'text', text: `\n[Advertencias: ${warnings.join('; ')}]` });
     }
 
     if (parts.length > 0 && !parts.some(p => p.type === 'text' && p.text)) {
       parts.unshift({ type: 'text', text: '[El usuario envió archivos adjuntos]' });
     }
 
-    return { parts, imageIds, audioIds };
+    return { parts, imageIds, audioIds, documentTexts, warnings };
   }
 
   /**
@@ -322,12 +351,40 @@ class Pipeline {
       if (onProcess) onProcess({ step, detail, ts: Date.now() });
     };
 
-    // ─── PASO 0: Multimodal pre-processing ───
+    // ─── PASO 0: Multimodal pre-processing + model selection ───
     let multimodalContent = null;
+    let modelSelection = null;
     if (attachments && attachments.length > 0) {
       sendProcess('Paso 0/22', 'Procesando archivos adjuntos...');
       multimodalContent = await this._processAttachments(attachments, userId);
-      sendProcess('Paso 0/22', `${multimodalContent.imageIds.length} imagen(es) | ${multimodalContent.audioIds.length} audio(s)`);
+      const imgCount = multimodalContent.imageIds.length;
+      const audCount = multimodalContent.audioIds.length;
+      const docCount = multimodalContent.documentTexts.length;
+      const parts = [];
+      if (imgCount > 0) parts.push(`${imgCount} imagen(es)`);
+      if (audCount > 0) parts.push(`${audCount} audio(s)`);
+      if (docCount > 0) parts.push(`${docCount} documento(s)`);
+      if (multimodalContent.warnings.length > 0) parts.push(`${multimodalContent.warnings.length} advertencia(s)`);
+      sendProcess('Paso 0/22', parts.join(' | ') || 'Archivos procesados');
+
+      // Select best model based on attachment capabilities
+      if (this._modelSelector && this._capabilityManager) {
+        const currentModel = { provider: process.env.CURRENT_PROVIDER || 'ollama', model: process.env.OLLAMA_MODEL || 'llama3.2' };
+        modelSelection = this._modelSelector.select(attachments, currentModel);
+        if (modelSelection.switched) {
+          sendProcess('Paso 0/22', `Modelo cambiado: ${modelSelection.model} (${modelSelection.reason})`);
+        } else if (modelSelection.unavailable) {
+          sendProcess('Paso 0/22', `⚠ ${modelSelection.reason}`);
+        }
+
+        // Inject model info into parts for the model to know about capabilities
+        if (modelSelection.switched) {
+          multimodalContent.parts.unshift({
+            type: 'text',
+            text: `[Sistema: Se seleccionó automáticamente el modelo ${modelSelection.model} (${modelSelection.provider}) para procesar tus archivos.]`,
+          });
+        }
+      }
 
       // Replace the last user message content with multimodal parts
       if (multimodalContent.parts.length > 0) {

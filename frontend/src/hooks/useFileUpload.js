@@ -3,6 +3,15 @@ import { useState, useRef, useCallback } from 'react';
 const ALLOWED_TYPES = {
   image: ['image/jpeg', 'image/png', 'image/gif', 'image/webp'],
   audio: ['audio/mpeg', 'audio/wav', 'audio/ogg', 'audio/webm', 'audio/mp4'],
+  document: [
+    'application/pdf',
+    'text/plain',
+    'text/markdown',
+    'text/csv',
+    'application/json',
+    'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+    'application/msword',
+  ],
 };
 
 const MAX_SIZE = 10 * 1024 * 1024;
@@ -13,9 +22,12 @@ export default function useFileUpload({ onFilesChange } = {}) {
   const fileInputRef = useRef(null);
 
   const validateFile = useCallback((file) => {
-    const allAllowed = [...ALLOWED_TYPES.image, ...ALLOWED_TYPES.audio];
-    if (!allAllowed.includes(file.type)) {
-      return `Tipo no permitido: ${file.type || 'desconocido'}`;
+    const allAllowed = [...ALLOWED_TYPES.image, ...ALLOWED_TYPES.audio, ...ALLOWED_TYPES.document];
+    const ext = file.name.split('.').pop().toLowerCase();
+    const extMap = { pdf: 'application/pdf', txt: 'text/plain', md: 'text/markdown', csv: 'text/csv', json: 'application/json', docx: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document', doc: 'application/msword' };
+    const isAllowed = allAllowed.includes(file.type) || extMap[ext];
+    if (!isAllowed) {
+      return `Tipo no permitido: ${file.type || ext || 'desconocido'}. Imágenes, audio, PDF, TXT, MD, CSV, JSON y DOCX.`;
     }
     if (file.size > MAX_SIZE) {
       return `Archivo muy grande (${(file.size / 1024 / 1024).toFixed(1)}MB). Máximo: 10MB`;

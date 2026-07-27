@@ -241,6 +241,21 @@ class PaprikaCore {
       },
     };
 
+    // ─── Capabilities: model knowledge + auto-selection ───
+    const { setupCapabilities, ModelSelector } = require('./capabilities');
+    const { getAvailableProviders } = require('../providers');
+    const availableProviders = getAvailableProviders();
+    this._capabilityManager = setupCapabilities(availableProviders, {
+      preferredChat: process.env.PREFERRED_CHAT_MODEL ? { provider: process.env.PREFERRED_CHAT_PROVIDER || 'ollama', model: process.env.PREFERRED_CHAT_MODEL } : null,
+      preferredVision: process.env.PREFERRED_VISION_MODEL ? { provider: process.env.PREFERRED_VISION_PROVIDER || 'gemini', model: process.env.PREFERRED_VISION_MODEL } : null,
+      preferredAudio: process.env.PREFERRED_AUDIO_MODEL ? { provider: process.env.PREFERRED_AUDIO_PROVIDER || 'groq', model: process.env.PREFERRED_AUDIO_MODEL } : null,
+    });
+    this._modelSelector = new ModelSelector(this._capabilityManager, {
+      preferredChat: process.env.PREFERRED_CHAT_MODEL ? { provider: process.env.PREFERRED_CHAT_PROVIDER || 'ollama', model: process.env.PREFERRED_CHAT_MODEL } : null,
+      preferredVision: process.env.PREFERRED_VISION_MODEL ? { provider: process.env.PREFERRED_VISION_PROVIDER || 'gemini', model: process.env.PREFERRED_VISION_MODEL } : null,
+      preferredAudio: process.env.PREFERRED_AUDIO_MODEL ? { provider: process.env.PREFERRED_AUDIO_PROVIDER || 'groq', model: process.env.PREFERRED_AUDIO_MODEL } : null,
+    });
+
     // ─── Pipeline (sin módulos de maintenance — esos son del SleepCycle) ───
     this.pipeline = new Pipeline({
       analyzer: this.analyzer,
@@ -271,6 +286,8 @@ class PaprikaCore {
       createAgenticLoop: () => new AgenticLoop(this._agenticLoopConfig),
       mediaManager: this.media,
       sttProvider: this.stt,
+      capabilityManager: this._capabilityManager,
+      modelSelector: this._modelSelector,
     });
 
     // ─── Sleep Cycle: conversation counter + async trigger ───

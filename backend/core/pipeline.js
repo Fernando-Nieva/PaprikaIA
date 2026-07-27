@@ -678,10 +678,20 @@ class Pipeline {
     const smartChatFn = async (messages, onChunk, options = {}) => {
       const DEBUG = process.env.DEBUG_ATTACHMENTS === 'true';
 
+      // Inyectar systemPrompt como mensaje system si viene en options
+      // (ProviderManager y providers solo leen system messages del array)
+      let finalMessages = messages;
+      if (options.systemPrompt) {
+        finalMessages = [
+          { role: 'system', content: options.systemPrompt },
+          ...messages.filter(m => m.role !== 'system')
+        ];
+      }
+
       if (executionPlan && this._providerManager) {
         sendProcess('Provider', `Usando: ${executionPlan.provider}/${executionPlan.model}`, 'info');
 
-        const result = await this._providerManager.execute(executionPlan, messages, onChunk, options);
+        const result = await this._providerManager.execute(executionPlan, finalMessages, onChunk, options);
 
         if (result.metadata.fallbackUsed) {
           sendProcess('Fallback', `Primario falló → ${result.metadata.provider}/${result.metadata.model} (intento ${result.metadata.attempts}/${result.metadata.totalAttempts})`, 'warn');
@@ -692,7 +702,7 @@ class Pipeline {
       }
 
       sendProcess('Provider', 'Legacy chatFn (sin executionPlan)', 'warn');
-      return chatFn(messages, onChunk, options);
+      return chatFn(finalMessages, onChunk, options);
     };
 
     if (this.createAgenticLoop && this.tools) {

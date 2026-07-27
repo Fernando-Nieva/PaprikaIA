@@ -93,7 +93,7 @@ async function chat(messages, onChunk, options = {}) {
       if (onChunk) onChunk(`\n🔄 Usando: ${name}\n`, 'tool');
 
       const response = await Promise.race([
-        provider.chat(allMessages, onChunk),
+        provider.chat(allMessages, onChunk, options),
         new Promise((_, reject) =>
           setTimeout(() => reject(new Error(`Timeout: ${name} no respondió en ${PROVIDER_TIMEOUT_MS / 1000}s`)), PROVIDER_TIMEOUT_MS)
         ),

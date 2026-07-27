@@ -149,10 +149,35 @@ class AgenticLoop {
       const toolsPrompt = this.toolExecutor.getToolsPrompt();
       const iterSystemPrompt = systemPrompt + '\n\n' + toolsPrompt;
 
+      if (process.env.DEBUG_ATTACHMENTS === 'true') {
+        console.log('\n─── [DEBUG ATTACHMENTS] Etapa 4: AgenticLoop._buildMessages ───');
+        console.log('  context.length:', context.length);
+        console.log('  messages.length:', messages.length);
+        const userMsgs = messages.filter(m => m.role === 'user');
+        console.log('  user messages count:', userMsgs.length);
+        userMsgs.forEach((m, i) => {
+          console.log(`  userMsg[${i}]: content type=${typeof m.content}, isArray=${Array.isArray(m.content)}`);
+          if (Array.isArray(m.content)) {
+            console.log(`    parts count: ${m.content.length}`);
+            m.content.forEach((p, j) => {
+              console.log(`    part[${j}]: type=${p.type}`, p.type === 'image_url' ? `url_len=${p.image_url?.url?.length}, prefix=${p.image_url?.url?.substring(0, 20)}` : p.type === 'text' ? `text="${p.text?.substring(0, 60)}"` : '?');
+            });
+          } else {
+            console.log(`    content (trunc): ${String(m.content).substring(0, 80)}`);
+          }
+        });
+      }
+
       this.progress.emitProgress(`Generando: ${stepDesc}`);
 
       let rawResponse;
       try {
+        if (process.env.DEBUG_ATTACHMENTS === 'true') {
+          console.log('\n─── [DEBUG ATTACHMENTS] Etapa 4b: Llamando llm() ───');
+          console.log('  Enviando', messages.length, 'mensajes al provider');
+          const hasMultimodal = messages.some(m => Array.isArray(m.content));
+          console.log('  ¿Algún mensaje con content array (multimodal)?', hasMultimodal);
+        }
         rawResponse = await llm(messages, null, {
           systemPrompt: iterSystemPrompt,
         });

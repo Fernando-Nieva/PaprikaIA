@@ -202,7 +202,7 @@ export default function Chat() {
           const data = JSON.parse(line.slice(6))
 
           if (data.type === 'process') {
-            setProcessLog(prev => [...prev, { step: data.step, detail: data.detail, ts: data.ts }])
+            setProcessLog(prev => [...prev, { step: data.step, detail: data.detail, logType: data.level || 'info', ts: data.ts }])
           }
 
           if (data.type === 'text') {
@@ -452,7 +452,7 @@ export default function Chat() {
           </div>
           <div className="console-body">
             {processLog.map((log, i) => (
-              <div key={i} className="console-line">
+              <div key={i} className={`console-line console-${log.logType || 'info'}`}>
                 <span className="console-step">{log.step}</span>
                 <span className="console-detail">{log.detail}</span>
               </div>

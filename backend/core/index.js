@@ -243,17 +243,34 @@ class PaprikaCore {
 
     // ─── Capabilities: model knowledge + auto-selection ───
     const { setupCapabilities, ModelSelector } = require('./capabilities');
-    const { getAvailableProviders } = require('../providers');
-    const availableProviders = getAvailableProviders();
-    this._capabilityManager = setupCapabilities(availableProviders, {
-      preferredChat: process.env.PREFERRED_CHAT_MODEL ? { provider: process.env.PREFERRED_CHAT_PROVIDER || 'ollama', model: process.env.PREFERRED_CHAT_MODEL } : null,
-      preferredVision: process.env.PREFERRED_VISION_MODEL ? { provider: process.env.PREFERRED_VISION_PROVIDER || 'gemini', model: process.env.PREFERRED_VISION_MODEL } : null,
-      preferredAudio: process.env.PREFERRED_AUDIO_MODEL ? { provider: process.env.PREFERRED_AUDIO_PROVIDER || 'groq', model: process.env.PREFERRED_AUDIO_MODEL } : null,
-    });
+    const { getModelRegistry } = require('../providers/modelRegistry');
+    const { getHealthManager } = require('../providers/healthManager');
+    this._modelRegistry = getModelRegistry();
+    this._healthManager = getHealthManager();
+
+    // CapabilityManager now reads directly from ModelRegistry
+    this._capabilityManager = setupCapabilities();
     this._modelSelector = new ModelSelector(this._capabilityManager, {
       preferredChat: process.env.PREFERRED_CHAT_MODEL ? { provider: process.env.PREFERRED_CHAT_PROVIDER || 'ollama', model: process.env.PREFERRED_CHAT_MODEL } : null,
       preferredVision: process.env.PREFERRED_VISION_MODEL ? { provider: process.env.PREFERRED_VISION_PROVIDER || 'gemini', model: process.env.PREFERRED_VISION_MODEL } : null,
       preferredAudio: process.env.PREFERRED_AUDIO_MODEL ? { provider: process.env.PREFERRED_AUDIO_PROVIDER || 'groq', model: process.env.PREFERRED_AUDIO_MODEL } : null,
+    });
+
+    // ─── Execution planner + Provider manager (priority-based fallback) ───
+    const { ExecutionPlanner } = require('../providers/executionPlanner');
+    const { ProviderManager } = require('../providers/providerManager');
+    const { createProviderInstances } = require('../providers');
+    this._executionPlanner = new ExecutionPlanner({
+      capabilityManager: this._capabilityManager,
+      modelRegistry: this._modelRegistry,
+      healthManager: this._healthManager,
+      defaultTimeout: parseInt(process.env.PAPRIKA_PROVIDER_TIMEOUT_MS, 10) || 60000,
+    });
+    this._providerManager = new ProviderManager({
+      providers: createProviderInstances(),
+      defaultTimeout: parseInt(process.env.PAPRIKA_PROVIDER_TIMEOUT_MS, 10) || 60000,
+      healthManager: this._healthManager,
+      modelRegistry: this._modelRegistry,
     });
 
     // ─── Pipeline (sin módulos de maintenance — esos son del SleepCycle) ───
@@ -288,6 +305,8 @@ class PaprikaCore {
       sttProvider: this.stt,
       capabilityManager: this._capabilityManager,
       modelSelector: this._modelSelector,
+      executionPlanner: this._executionPlanner,
+      providerManager: this._providerManager,
     });
 
     // ─── Sleep Cycle: conversation counter + async trigger ───
@@ -329,6 +348,32 @@ class PaprikaCore {
 
     // Backfill de embeddings para memorias existentes sin embedding
     this._backfillEmbeddings();
+
+    // Auto-discover all provider models (Ollama, Groq, Gemini, OpenRouter)
+    this._syncAllModels();
+  }
+
+  /**
+   * Sync all provider models into the ModelRegistry.
+   * Non-blocking; logs results at startup.
+   */
+  async _syncAllModels() {
+    try {
+      const results = await this._modelRegistry.syncAll();
+      for (const [provider, result] of Object.entries(results)) {
+        if (result.error) {
+          console.log(`   ⚠ ${provider} sync: ${result.error}`);
+        } else if (result.added?.length > 0) {
+          console.log(`   ✓ ${provider} sync: +${result.added.length} modelos: ${result.added.join(', ')}`);
+        } else if (result.available === false) {
+          console.log(`   ○ ${provider}: no disponible (sin API key o sin conexión)`);
+        } else {
+          console.log(`   ✓ ${provider}: sincronizado`);
+        }
+      }
+    } catch (err) {
+      console.log(`   ⚠ Model sync falló (no crítico): ${err.message}`);
+    }
   }
 
   /**

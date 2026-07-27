@@ -1,24 +1,39 @@
 /**
  * CapabilityManager — Central knowledge of what each model can do.
  *
- * Each provider declares its models with capabilities.
- * The CapabilityManager aggregates them and answers queries like:
- *   "Which models support vision?"
- *   "Does llama3.2 support images?"
- *   "What's the best model for PDF processing?"
+ * Now driven by ModelRegistry as the single source of truth.
+ * This module provides the query API that ModelSelector and other modules use.
  *
  * Design: Open/Closed — add new providers/models by calling register().
  */
 
+const { getModelRegistry } = require('../../providers/modelRegistry');
+
 class CapabilityManager {
-  constructor() {
-    this._providers = new Map();  // providerName -> { models: [...] }
+  constructor(registry) {
+    this._providers = new Map();
+    this._registry = registry || getModelRegistry();
+    this._syncFromRegistry();
+  }
+
+  /**
+   * Sync capabilities from ModelRegistry (single source of truth).
+   */
+  _syncFromRegistry() {
+    for (const providerData of this._registry.getAllProviders()) {
+      this._providers.set(providerData.provider, {
+        name: providerData.provider,
+        models: providerData.models.map(m => ({
+          name: m.name,
+          capabilities: m.capabilities,
+          contextLength: m.contextLength,
+        })),
+      });
+    }
   }
 
   /**
    * Register a provider with its models and capabilities.
-   * @param {string} providerName
-   * @param {Array<{name, capabilities, contextLength, maxTokens}>} models
    */
   register(providerName, models) {
     this._providers.set(providerName, {
@@ -29,7 +44,6 @@ class CapabilityManager {
 
   /**
    * Get all models across all providers.
-   * @returns {Array<{provider, name, capabilities, contextLength, maxTokens}>}
    */
   getAllModels() {
     const result = [];
@@ -43,8 +57,6 @@ class CapabilityManager {
 
   /**
    * Find models that have a specific capability.
-   * @param {string} capability - e.g. 'vision', 'audio', 'tools'
-   * @returns {Array<{provider, name, capabilities}>}
    */
   findByCapability(capability) {
     return this.getAllModels().filter(m => m.capabilities && m.capabilities[capability]);
@@ -52,10 +64,6 @@ class CapabilityManager {
 
   /**
    * Check if a specific model supports a capability.
-   * @param {string} providerName
-   * @param {string} modelName
-   * @param {string} capability
-   * @returns {boolean}
    */
   modelSupports(providerName, modelName, capability) {
     const provider = this._providers.get(providerName);
@@ -67,9 +75,6 @@ class CapabilityManager {
 
   /**
    * Get capabilities for a specific model.
-   * @param {string} providerName
-   * @param {string} modelName
-   * @returns {object|null}
    */
   getModelCapabilities(providerName, modelName) {
     const provider = this._providers.get(providerName);
@@ -80,8 +85,6 @@ class CapabilityManager {
 
   /**
    * Get a provider by name.
-   * @param {string} providerName
-   * @returns {object|null}
    */
   getProvider(providerName) {
     return this._providers.get(providerName) || null;
@@ -89,31 +92,53 @@ class CapabilityManager {
 
   /**
    * List all registered provider names.
-   * @returns {string[]}
    */
   listProviders() {
     return Array.from(this._providers.keys());
   }
+
+  /**
+   * Get providers that have at least one model supporting ALL required capabilities.
+   * Delegates to ModelRegistry for priority-sorted results.
+   */
+  getProvidersForCapabilities(requiredCapabilities) {
+    const requiredKeys = Object.entries(requiredCapabilities)
+      .filter(([, v]) => v === true)
+      .map(([k]) => k);
+
+    if (requiredKeys.length === 0) {
+      return this.getAllModels().map(m => ({
+        provider: m.provider,
+        model: m.name,
+        capabilities: m.capabilities,
+      }));
+    }
+
+    // Use ModelRegistry for priority-sorted results
+    const candidates = this._registry.findModelsByCapabilities(requiredCapabilities);
+    if (candidates.length > 0) {
+      return candidates.map(c => ({
+        provider: c.provider,
+        model: c.model,
+        capabilities: c.capabilities,
+      }));
+    }
+
+    // Fallback: local query
+    const result = [];
+    for (const model of this.getAllModels()) {
+      const caps = model.capabilities || {};
+      const hasAll = requiredKeys.every(k => caps[k] === true);
+      if (hasAll) {
+        result.push({
+          provider: model.provider,
+          model: model.name,
+          capabilities: caps,
+        });
+      }
+    }
+    return result;
+  }
 }
 
-// Default capabilities for known models
-const MODEL_CAPABILITIES = {
-  // Ollama models
-  'llama3.2':           { vision: false, audio: false, tools: true, streaming: true },
-  'llama3.2-vision':    { vision: true,  audio: false, tools: true, streaming: true },
-  'llava':              { vision: true,  audio: false, tools: false, streaming: true },
-  'llava-llama3':       { vision: true,  audio: false, tools: false, streaming: true },
-  'bakllava':           { vision: true,  audio: false, tools: false, streaming: true },
-  'moondream':          { vision: true,  audio: false, tools: false, streaming: true },
-  'minicpm-v':          { vision: true,  audio: false, tools: false, streaming: true },
-  'qwen2.5vl':          { vision: true,  audio: false, tools: true, streaming: true },
-
-  // Cloud models
-  'gemini-2.0-flash':   { vision: true,  audio: true,  tools: true, streaming: true },
-  'gemini-2.5-flash':   { vision: true,  audio: true,  tools: true, streaming: true },
-  'gpt-4o':             { vision: true,  audio: true,  tools: true, streaming: true },
-  'gpt-4o-mini':        { vision: true,  audio: false, tools: true, streaming: true },
-  'groq-llama-3.3-70b': { vision: false, audio: false, tools: true, streaming: true },
-};
-
-module.exports = { CapabilityManager, MODEL_CAPABILITIES };
+module.exports = { CapabilityManager };

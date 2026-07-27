@@ -3,34 +3,25 @@
  *
  * Usage:
  *   const { CapabilityManager, ModelSelector, setupCapabilities } = require('./capabilities');
- *   const cm = setupCapabilities(providers);
+ *   const cm = setupCapabilities();
  *   const selector = new ModelSelector(cm, config);
  */
 
-const { CapabilityManager, MODEL_CAPABILITIES } = require('./CapabilityManager');
+const { CapabilityManager } = require('./CapabilityManager');
 const ModelSelector = require('./ModelSelector');
+const { getModelRegistry } = require('../../providers/modelRegistry');
 
 /**
- * Setup capabilities from available providers.
- * @param {Array<{name, models}>} providers - from getAvailableProviders() or custom
- * @param {object} config - model selection preferences from .env
+ * Setup capabilities from ModelRegistry (single source of truth).
+ * No longer needs providers list — reads directly from ModelRegistry.
+ *
+ * @param {Array} [providers] - ignored, kept for backward compat
+ * @param {object} [config] - model selection preferences
  * @returns {CapabilityManager}
  */
 function setupCapabilities(providers, config = {}) {
-  const cm = new CapabilityManager();
-
-  for (const provider of providers) {
-    const models = (provider.models || []).map(m => ({
-      name: typeof m === 'string' ? m : m.name,
-      capabilities: typeof m === 'string'
-        ? (MODEL_CAPABILITIES[m] || { vision: false, audio: false, tools: true, streaming: true })
-        : m.capabilities,
-      contextLength: typeof m === 'object' ? m.contextLength : undefined,
-    }));
-    cm.register(provider.name, models);
-  }
-
-  return cm;
+  const registry = getModelRegistry();
+  return new CapabilityManager(registry);
 }
 
-module.exports = { CapabilityManager, ModelSelector, MODEL_CAPABILITIES, setupCapabilities };
+module.exports = { CapabilityManager, ModelSelector, setupCapabilities };

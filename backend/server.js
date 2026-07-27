@@ -1,3 +1,4 @@
+require('dotenv').config();
 const express = require('express');
 const cors = require('cors');
 const path = require('path');
@@ -8,7 +9,7 @@ const db = require('./db');
 const createCore = require('./core');
 
 const app = express();
-const PORT = 3001;
+const PORT = process.env.PORT || 3001;
 
 // ─── Middleware global (CORS, JSON) ANTES de todas las rutas ───
 app.use(cors());
@@ -38,7 +39,15 @@ app.get('/api/telemetry/logs', (req, res) => {
   res.json(telemetry.getLogs(limit));
 });
 
-app.listen(PORT, '0.0.0.0', () => {
+const server = app.listen(PORT, '0.0.0.0', () => {
   console.log(`🤖 Backend corriendo en http://0.0.0.0:${PORT}`);
   console.log(`📊 Core status:`, core.getStatus());
+});
+
+server.on('error', (err) => {
+  if (err.code === 'EADDRINUSE') {
+    console.error(`❌ Puerto ${PORT} ya está en uso. Usa PORT en .env para cambiarlo.`);
+    process.exit(1);
+  }
+  throw err;
 });

@@ -428,7 +428,7 @@ body {
   border-top: 1px solid var(--border);
   background: var(--bg-secondary);
   flex-shrink: 0;
-  height: 160px;
+  height: 200px;
   display: flex;
   flex-direction: column;
 }
@@ -492,6 +492,22 @@ body {
   font-style: italic;
   padding: 6px 0;
 }
+
+/* Console line type variants */
+.console-line.console-warn .console-step { color: #f59e0b; }
+.console-line.console-warn .console-detail { color: #fbbf24; }
+
+.console-line.console-error .console-step { color: #ef4444; }
+.console-line.console-error .console-detail { color: #f87171; }
+
+.console-line.console-success .console-step { color: #22c55e; }
+.console-line.console-success .console-detail { color: #4ade80; }
+
+.console-line.console-data .console-step { color: #3b82f6; }
+.console-line.console-data .console-detail { color: #93c5fd; }
+
+.console-line.console-tool .console-step { color: #a78bfa; }
+.console-line.console-tool .console-detail { color: #c4b5fd; }
 
 /* ===================== INPUT ===================== */
 .input-container {
@@ -678,7 +694,7 @@ body {
   }
 
   .process-console {
-    height: 120px;
+    height: 150px;
   }
 
   .input-container {

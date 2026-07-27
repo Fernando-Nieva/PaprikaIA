@@ -5,7 +5,10 @@
   "main": "server.js",
   "scripts": {
     "start": "node server.js",
-    "dev": "nodemon server.js"
+    "dev": "nodemon server.js",
+    "diagnose:providers": "node diagnose.js",
+    "selftest:vision": "node selftest-vision.js",
+    "test": "node --test providers/__tests__/capability-fallback.test.js providers/__tests__/e2e-image.test.js"
   },
   "dependencies": {
     "@google/generative-ai": "^0.24.1",

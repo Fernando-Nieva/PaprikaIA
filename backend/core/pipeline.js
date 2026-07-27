@@ -144,6 +144,8 @@ class Pipeline {
     this._sttProvider = modules.sttProvider || null;
     this._capabilityManager = modules.capabilityManager || null;
     this._modelSelector = modules.modelSelector || null;
+    this._executionPlanner = modules.executionPlanner || null;
+    this._providerManager = modules.providerManager || null;
     this._documentProcessor = new DocumentProcessor();
   }
 
@@ -157,6 +159,13 @@ class Pipeline {
    * @returns {Promise<Object>} { parts, imageIds, audioIds }
    */
   async _processAttachments(attachments, userId) {
+    const DEBUG = process.env.DEBUG_ATTACHMENTS === 'true';
+    if (DEBUG) {
+      console.log('\n─── [DEBUG ATTACHMENTS] Etapa 2: _processAttachments ───');
+      console.log('  Input attachments:', attachments.length);
+      console.log('  userId:', userId);
+    }
+
     const parts = [];
     const imageIds = [];
     const audioIds = [];
@@ -165,10 +174,14 @@ class Pipeline {
 
     for (const att of attachments) {
       const mime = (att.mimeType || '').toLowerCase();
+      if (DEBUG) {
+        console.log(`\n  Procesando: mime=${mime}, filename=${att.filename}, hasId=${!!att.id}, hasBase64=${!!att.base64}, base64Len=${att.base64 ? att.base64.length : 0}`);
+      }
 
       // ─── Images ───
       if (mime.startsWith('image/')) {
         if (att.id && this._mediaManager) {
+          if (DEBUG) console.log('    → Ruta A: att.id + mediaManager (NO aplica porque att.id es undefined)');
           const base64 = await this._mediaManager.readFileAsBase64(att.id);
           if (base64) {
             const media = this._mediaManager.getMedia(att.id);
@@ -177,7 +190,11 @@ class Pipeline {
             imageIds.push(att.id);
           }
         } else if (att.base64) {
+          if (DEBUG) console.log('    → Ruta B: att.base64 directa (ESTA ES LA RUTA ACTIVA)');
           parts.push({ type: 'image_url', image_url: { url: `data:${att.mimeType};base64,${att.base64}` } });
+          if (DEBUG) console.log('    → Part creada:', JSON.stringify({ type: 'image_url', image_url: { url: `data:${att.mimeType};base64,${att.base64.substring(0, 30)}...` } }));
+        } else {
+          if (DEBUG) console.log('    → ⚠ IMAGEN SIN base64 NI id — DESCARTADA');
         }
         continue;
       }
@@ -229,6 +246,19 @@ class Pipeline {
 
     if (parts.length > 0 && !parts.some(p => p.type === 'text' && p.text)) {
       parts.unshift({ type: 'text', text: '[El usuario envió archivos adjuntos]' });
+    }
+
+    if (DEBUG) {
+      console.log('\n  ─── _processAttachments OUTPUT ───');
+      console.log('  parts.length:', parts.length);
+      parts.forEach((p, i) => {
+        console.log(`  part[${i}]: type=${p.type}`, p.type === 'image_url' ? `url_len=${p.image_url?.url?.length}` : p.type === 'text' ? `text="${p.text?.substring(0, 60)}"` : JSON.stringify(p));
+      });
+      console.log('  imageIds:', imageIds);
+      console.log('  audioIds:', audioIds);
+      console.log('  documentTexts:', documentTexts.length);
+      console.log('  warnings:', warnings);
+      console.log('═══════════════════════════════════════════════════════════\n');
     }
 
     return { parts, imageIds, audioIds, documentTexts, warnings };
@@ -347,14 +377,23 @@ class Pipeline {
       console.error('[Pipeline] ArchiveMemory.buildArchiveContext failed:', err.message);
     }
 
-    const sendProcess = (step, detail) => {
-      if (onProcess) onProcess({ step, detail, ts: Date.now() });
+    const sendProcess = (step, detail, level = 'info') => {
+      if (onProcess) onProcess({ step, detail, level, ts: Date.now() });
     };
 
     // ─── PASO 0: Multimodal pre-processing + model selection ───
     let multimodalContent = null;
     let modelSelection = null;
+    let executionPlan = null;
     if (attachments && attachments.length > 0) {
+      if (process.env.DEBUG_ATTACHMENTS === 'true') {
+        console.log('\n══════════════════════════════════════════════════');
+        console.log('📂 [DEBUG ATTACHMENTS] Etapa 3: PASO 0 — Injection');
+        console.log('══════════════════════════════════════════════════');
+        console.log('  workingMessages ANTES de inject:', workingMessages.length, 'mensajes');
+        const lastMsg = workingMessages[workingMessages.length - 1];
+        console.log('  Último msg ANTES: role=', lastMsg?.role, 'content type=', typeof lastMsg?.content, 'isString=', typeof lastMsg?.content === 'string');
+      }
       sendProcess('Paso 0/22', 'Procesando archivos adjuntos...');
       multimodalContent = await this._processAttachments(attachments, userId);
       const imgCount = multimodalContent.imageIds.length;
@@ -365,16 +404,26 @@ class Pipeline {
       if (audCount > 0) parts.push(`${audCount} audio(s)`);
       if (docCount > 0) parts.push(`${docCount} documento(s)`);
       if (multimodalContent.warnings.length > 0) parts.push(`${multimodalContent.warnings.length} advertencia(s)`);
-      sendProcess('Paso 0/22', parts.join(' | ') || 'Archivos procesados');
+      sendProcess('Paso 0/22', parts.join(' | ') || 'Archivos procesados', 'data');
+
+      // Detailed attachment info for console
+      for (const att of attachments) {
+        const mime = (att.mimeType || '').toLowerCase();
+        const isImage = mime.startsWith('image/');
+        const isAudio = mime.startsWith('audio/');
+        const b64Len = att.base64 ? att.base64.length : 0;
+        sendProcess('Adjunto', `${att.filename || '?'} | ${att.mimeType || '?'} | ${b64Len} chars base64${isImage ? ' → image_url' : isAudio ? ' → transcripción' : ' → documento'}`, isImage ? 'data' : 'info');
+      }
 
       // Select best model based on attachment capabilities
       if (this._modelSelector && this._capabilityManager) {
         const currentModel = { provider: process.env.CURRENT_PROVIDER || 'ollama', model: process.env.OLLAMA_MODEL || 'llama3.2' };
         modelSelection = this._modelSelector.select(attachments, currentModel);
+        sendProcess('Model', `${currentModel.provider}/${currentModel.model} → ${modelSelection.provider}/${modelSelection.model}`, modelSelection.switched ? 'warn' : 'info');
         if (modelSelection.switched) {
-          sendProcess('Paso 0/22', `Modelo cambiado: ${modelSelection.model} (${modelSelection.reason})`);
+          sendProcess('Paso 0/22', `Modelo cambiado: ${modelSelection.model} (${modelSelection.reason})`, 'warn');
         } else if (modelSelection.unavailable) {
-          sendProcess('Paso 0/22', `⚠ ${modelSelection.reason}`);
+          sendProcess('Paso 0/22', `⚠ ${modelSelection.reason}`, 'error');
         }
 
         // Inject model info into parts for the model to know about capabilities
@@ -384,13 +433,44 @@ class Pipeline {
             text: `[Sistema: Se seleccionó automáticamente el modelo ${modelSelection.model} (${modelSelection.provider}) para procesar tus archivos.]`,
           });
         }
+
+        // Build execution plan from requirements + model selection
+        if (this._executionPlanner && modelSelection) {
+          const requirements = modelSelection.requirements || {};
+          executionPlan = this._executionPlanner.plan(requirements, modelSelection);
+          const fallbacks = executionPlan.fallbackChain.map(f => `${f.provider}/${f.model}`).join(' → ') || 'ninguno';
+          sendProcess('Plan', `Primary: ${executionPlan.provider}/${executionPlan.model}`, 'info');
+          sendProcess('Plan', `Fallbacks: ${fallbacks}`, 'info');
+          if (executionPlan.metadata.discards.length > 0) {
+            sendProcess('Plan', `Descartados: ${executionPlan.metadata.discards.map(d => `${d.provider} (${d.reason})`).join(', ')}`, 'warn');
+          }
+        }
       }
 
       // Replace the last user message content with multimodal parts
       if (multimodalContent.parts.length > 0) {
         const lastMsg = workingMessages[workingMessages.length - 1];
         if (lastMsg && lastMsg.role === 'user') {
+          if (process.env.DEBUG_ATTACHMENTS === 'true') {
+            console.log('\n  ─── ANTES de reemplazar lastMsg.content ───');
+            console.log('  lastMsg.content type:', typeof lastMsg.content);
+            console.log('  lastMsg.content (trunc):', typeof lastMsg.content === 'string' ? lastMsg.content.substring(0, 60) : JSON.stringify(lastMsg.content).substring(0, 60));
+            console.log('  multimodalContent.parts:', JSON.stringify(multimodalContent.parts.map(p => ({ type: p.type, textLen: p.text?.length, urlLen: p.image_url?.url?.length }))));
+          }
           lastMsg.content = multimodalContent.parts;
+          if (process.env.DEBUG_ATTACHMENTS === 'true') {
+            console.log('\n  ─── DESPUÉS de reemplazar lastMsg.content ───');
+            console.log('  lastMsg.content type:', typeof lastMsg.content, 'isArray:', Array.isArray(lastMsg.content));
+            console.log('  lastMsg.content.length:', lastMsg.content.length);
+            console.log('  workingMessages DESPUÉS:', workingMessages.length, 'mensajes');
+            const lastAfter = workingMessages[workingMessages.length - 1];
+            console.log('  Último msg DESPUÉS: role=', lastAfter?.role, 'content isArray=', Array.isArray(lastAfter?.content), 'parts=', Array.isArray(lastAfter?.content) ? lastAfter.content.length : 'N/A');
+            if (Array.isArray(lastAfter?.content)) {
+              lastAfter.content.forEach((p, i) => {
+                console.log(`    part[${i}]: type=${p.type}`, p.type === 'image_url' ? `url_len=${p.image_url?.url?.length}` : p.type === 'text' ? `text="${p.text?.substring(0, 60)}"` : '?');
+              });
+            }
+          }
         }
       }
     }
@@ -582,10 +662,38 @@ class Pipeline {
     );
     sendProcess('Paso 13/22', `Prompt: ~${Math.ceil(systemPrompt.length / 4)} tokens`);
 
+    // Inject vision capability instruction when images are present
+    let finalSystemPrompt = systemPrompt;
+    if (multimodalContent && multimodalContent.imageIds.length > 0) {
+      finalSystemPrompt += '\n\n[Capacidad activa: Tenés visión. El usuario te envió una imagen. Analizala, describila y respondé sobre su contenido. No digas que no podés ver imágenes — las estás viendo ahora.]';
+      sendProcess('Prompt', 'Visión activada — imagen detectada en el mensaje', 'success');
+    }
+
     // ─── PASO 14: Proveedor IA — genera respuesta (con agentic loop o tools) ───
     sendProcess('Paso 14/22', 'Generando respuesta con IA...');
     let rawResponse;
     let agenticMetadata = null;
+
+    // Smart chatFn: uses ProviderManager with capability-based fallback when executionPlan exists
+    const smartChatFn = async (messages, onChunk, options = {}) => {
+      const DEBUG = process.env.DEBUG_ATTACHMENTS === 'true';
+
+      if (executionPlan && this._providerManager) {
+        sendProcess('Provider', `Usando: ${executionPlan.provider}/${executionPlan.model}`, 'info');
+
+        const result = await this._providerManager.execute(executionPlan, messages, onChunk, options);
+
+        if (result.metadata.fallbackUsed) {
+          sendProcess('Fallback', `Primario falló → ${result.metadata.provider}/${result.metadata.model} (intento ${result.metadata.attempts}/${result.metadata.totalAttempts})`, 'warn');
+        }
+        sendProcess('Response', `${result.metadata.provider}/${result.metadata.model} → ${(result.response || '').length} chars`, 'success');
+
+        return result.response;
+      }
+
+      sendProcess('Provider', 'Legacy chatFn (sin executionPlan)', 'warn');
+      return chatFn(messages, onChunk, options);
+    };
 
     if (this.createAgenticLoop && this.tools) {
       // Agentic loop: planning → execution → reflection cycle (fresh instance per request)
@@ -606,8 +714,8 @@ class Pipeline {
           objective: message,
           context: workingMessages,
           analysis,
-          systemPrompt,
-          chatFn,
+          systemPrompt: finalSystemPrompt,
+          chatFn: smartChatFn,
           onChunk,
         }),
         { response: '', metadata: {} },
@@ -630,7 +738,17 @@ class Pipeline {
           } else {
             const cleanQuery = this._extractSearchQuery(message);
             console.log(`[Pipeline] Query original: "${message}" → Limpio: "${cleanQuery}"`);
-            const searchResult = await sm.search(cleanQuery, { maxResults: 5 });
+
+            // Auto-detectar categoría para SearXNG
+            const searchCategory = /\b(video|youtube|ver|tutorial|clase|música|canción|opening|anime|pelicula)\b/i.test(message)
+              ? 'videos'
+              : /\b(foto|imagen|picture|wallpaper|fondo)\b/i.test(message)
+                ? 'images'
+                : /\b(noticias|actualidad|última\s+hora)\b/i.test(message)
+                  ? 'news'
+                  : undefined;
+
+            const searchResult = await sm.search(cleanQuery, { maxResults: 5, category: searchCategory });
             if (searchResult && searchResult.results && searchResult.results.length > 0) {
               // Generate rich content attachments from search results
               const detector = new AttachmentDetector();
@@ -674,8 +792,8 @@ class Pipeline {
       sendProcess('Paso 14/22', `Agentic: ${agenticMetadata?.iterations || 0} iteraciones (${rawResponse.length} chars)`);
     } else if (this.tools) {
       // Legacy tool loop (fallback)
-      let finalSystemPrompt = systemPrompt + '\n\n' + this.tools.getToolsPrompt();
-      rawResponse = await chatFn(workingMessages, onChunk, { systemPrompt: finalSystemPrompt });
+      finalSystemPrompt = finalSystemPrompt + '\n\n' + this.tools.getToolsPrompt();
+      rawResponse = await smartChatFn(workingMessages, onChunk, { systemPrompt: finalSystemPrompt });
 
       const MAX_TOOL_ROUNDS = 3;
       for (let round = 0; round < MAX_TOOL_ROUNDS; round++) {
@@ -707,14 +825,14 @@ class Pipeline {
           { role: 'system', content: `Resultados de herramientas:\n${toolResultsText}\n\nAhora respondé al usuario usando esta información. No vuelvas a llamar herramientas que ya ejecutaste.` },
         ];
 
-        rawResponse = await chatFn(toolMessages, onChunk, { systemPrompt: finalSystemPrompt });
+        rawResponse = await smartChatFn(toolMessages, onChunk, { systemPrompt: finalSystemPrompt });
 
         if (onChunk) {
           onChunk(`\n🔄 Usando: tools (${toolCalls.map(t => t.name).join(', ')})\n`, 'tool');
         }
       }
     } else {
-      rawResponse = await chatFn(workingMessages, onChunk, { systemPrompt });
+      rawResponse = await smartChatFn(workingMessages, onChunk, { systemPrompt: finalSystemPrompt });
     }
 
     sendProcess('Paso 14/22', `Respuesta generada (${(rawResponse || '').length} chars)`);

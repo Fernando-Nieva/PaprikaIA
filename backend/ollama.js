@@ -26,6 +26,23 @@ ${config.reglas.map(r => `- ${r}`).join('\n')}`;
  * @returns {Promise<string>} Respuesta completa
  */
 async function chat(messages, onChunk, options = {}) {
+  if (process.env.DEBUG_ATTACHMENTS === 'true') {
+    console.log('\n─── [DEBUG ATTACHMENTS] Etapa 5: ollama.js chat() ───');
+    console.log('  Input messages:', messages.length);
+    const hasMultimodal = messages.some(m => Array.isArray(m.content));
+    console.log('  ¿Algún message con content array?', hasMultimodal);
+    if (hasMultimodal) {
+      messages.forEach((m, i) => {
+        if (Array.isArray(m.content)) {
+          console.log(`  msg[${i}] role=${m.role}: content is ARRAY with ${m.content.length} parts`);
+          m.content.forEach((p, j) => {
+            console.log(`    part[${j}]: type=${p.type}`, p.type === 'image_url' ? `url_len=${p.image_url?.url?.length}` : '');
+          });
+        }
+      });
+    }
+  }
+
   // Si se provee un system prompt personalizado, usarlo
   // Si no, verificar si el primer mensaje ya es un system message
   const hasSystemMessage = messages.length > 0 && messages[0].role === 'system';
@@ -59,6 +76,20 @@ async function chat(messages, onChunk, options = {}) {
 
   for (const { name, provider } of providers) {
     try {
+      if (process.env.DEBUG_ATTACHMENTS === 'true') {
+        console.log(`\n─── [DEBUG ATTACHMENTS] Etapa 5b: provider.chat() → ${name} ───`);
+        console.log('  Enviando allMessages:', allMessages.length, 'mensajes');
+        allMessages.forEach((m, i) => {
+          const contentIsArray = Array.isArray(m.content);
+          console.log(`  msg[${i}] role=${m.role}: content type=${typeof m.content}, isArray=${contentIsArray}`);
+          if (contentIsArray) {
+            m.content.forEach((p, j) => {
+              console.log(`    part[${j}]: type=${p.type}`, p.type === 'image_url' ? `url_len=${p.image_url?.url?.length}` : p.type === 'text' ? `text="${p.text?.substring(0, 40)}"` : '');
+            });
+          }
+        });
+      }
+
       if (onChunk) onChunk(`\n🔄 Usando: ${name}\n`, 'tool');
 
       const response = await Promise.race([

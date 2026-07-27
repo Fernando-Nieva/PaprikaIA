@@ -1,11 +1,19 @@
 /**
  * ModelSelector — Automatically selects the best model for a given task.
  *
- * Analyzes the message and attachments, then picks the optimal model.
- * Falls back intelligently when the preferred model doesn't support needed capabilities.
+ * Priority system:
+ *   Level 1 (FREE): Ollama local → Groq → Gemini free tier
+ *   Level 2 (OPTIONAL): OpenRouter free models
+ *   Level 3 (PAID): OpenAI, Anthropic — only if user configured AND no free alternative
+ *
+ * Design principles:
+ *   - ALWAYS prefer free models when capabilities match
+ *   - NEVER depend on a single provider
+ *   - Personality belongs to Paprika, not the model
+ *   - Select by capabilities, never by hardcoded names
  */
 
-const { MODEL_CAPABILITIES } = require('./CapabilityManager');
+const { getModelRegistry, PRIORITY } = require('../../providers/modelRegistry');
 
 class ModelSelector {
   /**
@@ -14,18 +22,17 @@ class ModelSelector {
    */
   constructor(capabilityManager, config = {}) {
     this.cm = capabilityManager;
+    this.registry = getModelRegistry();
     this.config = {
-      preferredChat: config.preferredChat || null,       // { provider, model }
-      preferredVision: config.preferredVision || null,    // { provider, model }
-      preferredAudio: config.preferredAudio || null,      // { provider, model }
-      preferredDocument: config.preferredDocument || null, // { provider, model }
+      preferredChat: config.preferredChat || null,
+      preferredVision: config.preferredVision || null,
+      preferredAudio: config.preferredAudio || null,
+      preferredDocument: config.preferredDocument || null,
     };
   }
 
   /**
    * Analyze attachments and determine what capabilities are needed.
-   * @param {Array} attachments - [{ mimeType, base64?, filename? }]
-   * @returns {{ needsVision: boolean, needsAudio: boolean, needsDocument: boolean, reasons: string[] }}
    */
   analyzeAttachments(attachments) {
     if (!attachments || attachments.length === 0) {
@@ -66,9 +73,11 @@ class ModelSelector {
   /**
    * Select the best model for the given requirements.
    *
-   * @param {{ needsVision, needsAudio, needsDocument }} requirements
-   * @param {{ provider, model }} currentModel - The currently active model
-   * @returns {{ provider, model, switched: boolean, reason: string }}
+   * Selection order:
+   *   1. If current model supports the capability → keep it
+   *   2. Try preferred model for this capability type
+   *   3. Auto-discover using ModelRegistry (priority-sorted: free first)
+   *   4. No model found → return unavailable
    */
   selectModel(requirements, currentModel) {
     const { needsVision, needsAudio, needsDocument } = requirements;
@@ -79,14 +88,14 @@ class ModelSelector {
         provider: currentModel.provider,
         model: currentModel.model,
         switched: false,
-        reason: ' Sin requisitos especiales',
+        reason: 'Sin requisitos especiales',
       };
     }
 
     // Determine required capability
     const requiredCapability = needsVision ? 'vision' : needsAudio ? 'audio' : 'tools';
 
-    // Check if current model supports it
+    // 1. Check if current model supports it
     const currentSupports = this.cm.modelSupports(
       currentModel.provider, currentModel.model, requiredCapability
     );
@@ -100,8 +109,7 @@ class ModelSelector {
       };
     }
 
-    // Current model doesn't support it → find a better one
-    // 1. Try preferred model for this capability
+    // 2. Try preferred model for this capability
     const preferred = this.config[`preferred${needsVision ? 'Vision' : needsAudio ? 'Audio' : 'Document'}`];
     if (preferred) {
       const preferredSupports = this.cm.modelSupports(
@@ -112,26 +120,44 @@ class ModelSelector {
           provider: preferred.provider,
           model: preferred.model,
           switched: true,
-          reason: `Modelo actual no soporta ${requiredCapability}. Usando modelo preferido: ${preferred.model}`,
+          reason: `Modelo preferido: ${preferred.model} (${preferred.provider})`,
         };
       }
     }
 
-    // 2. Auto-discover: find ANY model with the capability
+    // 3. Auto-discover using ModelRegistry (priority-sorted: free first)
+    const best = this.registry.selectBest({ [requiredCapability]: true });
+    if (best) {
+      return {
+        provider: best.provider,
+        model: best.model,
+        switched: true,
+        reason: best.reason,
+      };
+    }
+
+    // 4. Fallback: try CapabilityManager (legacy path)
     const candidates = this.cm.findByCapability(requiredCapability);
     if (candidates.length > 0) {
-      // Prefer cloud models over local for reliability
-      const cloud = candidates.find(c => c.provider !== 'ollama');
-      const pick = cloud || candidates[0];
+      // Use priority from ModelRegistry if available
+      const enriched = candidates.map(c => {
+        const providerData = this.registry.getProvider(c.provider);
+        return {
+          ...c,
+          priority: providerData?.priority || PRIORITY.PAID,
+        };
+      });
+      enriched.sort((a, b) => a.priority - b.priority);
+      const pick = enriched[0];
       return {
         provider: pick.provider,
         model: pick.name,
         switched: true,
-        reason: `Modelo actual no soporta ${requiredCapability}. Auto-seleccionado: ${pick.name} (${pick.provider})`,
+        reason: `Auto-seleccionado: ${pick.name} (${pick.provider})`,
       };
     }
 
-    // 3. No model found with the capability
+    // 5. No model found
     return {
       provider: currentModel.provider,
       model: currentModel.model,
@@ -143,9 +169,6 @@ class ModelSelector {
 
   /**
    * Full selection flow: analyze + select.
-   * @param {Array} attachments
-   * @param {{ provider, model }} currentModel
-   * @returns {{ provider, model, switched, reason, unavailable, requirements }}
    */
   select(attachments, currentModel) {
     const requirements = this.analyzeAttachments(attachments);

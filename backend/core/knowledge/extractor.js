@@ -172,7 +172,11 @@ class EntityExtractor {
    * @returns {Promise<Array<Object>>} Entidades persistidas
    */
   async extractAndPersist(userId, text, context = {}) {
-    const entities = this.extractFromText(text, context);
+    let entities = this.extractFromText(text, context);
+
+    // Corrige typos en nombres conocidos (ej: "fernnado" → "Fernando")
+    // comparando con entidades persona ya conocidas del usuario.
+    entities = await this._correctKnownNameTypos(userId, entities);
     const persisted = [];
 
     for (const entity of entities) {
@@ -198,6 +202,80 @@ class EntityExtractor {
     }
 
     return persisted;
+  }
+
+  /**
+   * Corrige typos en nombres de personas comparando con entidades persona
+   * ya conocidas del usuario (ej: "fernnado" → "Fernando").
+   *
+   * Usa distancia de edición (Levenshtein): si un nombre extraído está a
+   * distancia ≤ 2 de un nombre conocido, lo reemplaza por la versión canónica.
+   *
+   * @param {string} userId
+   * @param {Array<Object>} entities - Entidades extraídas
+   * @returns {Promise<Array<Object>>} Entidades con nombres corregidos
+   */
+  async _correctKnownNameTypos(userId, entities) {
+    const persons = entities.filter(e => e.type === 'person');
+    if (persons.length === 0) return entities;
+
+    let knownNames = [];
+    try {
+      knownNames = (await this.kg.getEntitiesByUser(userId, { type: 'person', limit: 100 }))
+        .map(e => e.name)
+        .filter(name => name && name.length > 2);
+    } catch (err) {
+      console.warn(`[EntityExtractor] Could not load known persons for typo correction: ${err.message}`);
+      return entities;
+    }
+    if (knownNames.length === 0) return entities;
+
+    return entities.map(entity => {
+      if (entity.type !== 'person') return entity;
+      const target = entity.name.toLowerCase();
+      let bestMatch = null;
+      let bestDist = Infinity;
+      for (const known of knownNames) {
+        const dist = this._levenshtein(target, known.toLowerCase());
+        if (dist < bestDist) {
+          bestDist = dist === undefined ? 9999 : dist;
+          bestMatch = known;
+        }
+      }
+      if (bestMatch && bestDist > 0 && bestDist <= 2) {
+        return { ...entity, name: bestMatch, corrected: true, confidence: Math.max(entity.confidence, 0.85) };
+      }
+      return entity;
+    });
+  }
+
+  /**
+   * Distancia de edición Levenshtein entre dos strings.
+   *
+   * @param {string} a
+   * @param {string} b
+   * @returns {number}
+   */
+  _levenshtein(a, b) {
+    const m = a.length;
+    const n = b.length;
+    if (m === 0) return n;
+    if (n === 0) return m;
+
+    let prev = Array.from({ length: n + 1 }, (_, i) => i);
+    for (let i = 1; i <= m; i++) {
+      const curr = [i];
+      for (let j = 1; j <= n; j++) {
+        const cost = a[i - 1] === b[j - 1] ? 0 : 1;
+        curr[j] = Math.min(
+          prev[j] + 1,       // borrado
+          curr[j - 1] + 1,   // inserción
+          prev[j - 1] + cost // sustitución
+        );
+      }
+      prev = curr;
+    }
+    return prev[n];
   }
 
   // ─────────────────────────────────────────────

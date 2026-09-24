@@ -63,11 +63,14 @@ class ProviderManager {
     for (const entry of chain) {
       attemptNumber++;
 
-      // Check health — skip degraded providers
-      if (!this.health.isAvailable(entry.provider)) {
-        const healthData = this.health.getHealth ? this.health.getHealth(entry.provider) : null;
+      // Track health per provider+model (not per provider) so one bad model doesn't kill the whole provider
+      const healthKey = `${entry.provider}/${entry.model}`;
+
+      // Check health — skip degraded provider/model combos
+      if (!this.health.isAvailable(healthKey)) {
+        const healthData = this.health.getHealth ? this.health.getHealth(healthKey) : null;
         if (DEBUG) {
-          console.log(`  ⏭ Skipping ${entry.provider} — degraded (cooldown: ${healthData?.remainingCooldownMs || '?'}ms)`);
+          console.log(`  ⏭ Skipping ${healthKey} — degraded (cooldown: ${healthData?.remainingCooldownMs || '?'}ms)`);
         }
         continue;
       }
@@ -128,14 +131,14 @@ class ProviderManager {
         // Validate
         const validation = ResponseNormalizer.validate(normalized);
         if (!validation.valid) {
-          if (DEBUG) console.log(`  ⚠ ${entry.provider}: invalid response — ${validation.reason}`);
-          lastError = new Error(`Invalid response from ${entry.provider}: ${validation.reason}`);
-          this.health.recordFailure(entry.provider, lastError);
+          if (DEBUG) console.log(`  ⚠ ${healthKey}: invalid response — ${validation.reason}`);
+          lastError = new Error(`Invalid response from ${healthKey}: ${validation.reason}`);
+          this.health.recordFailure(healthKey, lastError);
           continue;
         }
 
         // Record success
-        this.health.recordSuccess(entry.provider);
+        this.health.recordSuccess(healthKey);
 
         if (DEBUG) {
           console.log(`  ✅ ${entry.provider}: response received (${normalized.text.length} chars)`);
@@ -155,11 +158,11 @@ class ProviderManager {
         };
       } catch (err) {
         lastError = err;
-        this.health.recordFailure(entry.provider, err);
+        this.health.recordFailure(healthKey, err);
 
-        if (DEBUG) console.log(`  ❌ ${entry.provider} (${entry.model}) falló: ${err.message.substring(0, 100)}`);
+        if (DEBUG) console.log(`  ❌ ${healthKey} falló: ${err.message.substring(0, 100)}`);
         if (onChunk) {
-          onChunk(`\n❌ ${entry.provider} (${entry.model}) falló: ${err.message.substring(0, 80)}\n`, 'tool');
+          onChunk(`\n❌ ${healthKey} falló: ${err.message.substring(0, 80)}\n`, 'tool');
         }
         continue;
       }

@@ -15,7 +15,6 @@ const { URL } = require('url');
 const BaseProvider = require('./BaseProvider');
 
 const DDG_HTML_URL = 'https://html.duckduckgo.com/html/';
-const DDG_VIDEO_URL = 'https://html.duckduckgo.com/html/';
 
 const DEFAULT_CONFIG = {
   timeout: 10000,
@@ -41,8 +40,16 @@ class DuckDuckGoProvider extends BaseProvider {
   async search(query, options = {}) {
     if (!query || !query.trim()) return [];
 
+    // DuckDuckGo HTML no tiene un endpoint JSON por categoría, así que para
+    // videos reforzamos el query con la palabra clave "video" para que los
+    // resultados sean vínculos de video (YouTube y otros).
+    let queryText = query.trim();
+    if (options.category === 'videos' && !/(video|youtube)/i.test(queryText)) {
+      queryText += ' video';
+    }
+
     const params = new URLSearchParams({
-      q: query.trim(),
+      q: queryText.trim(),
       kl: options.language === 'es' ? 'es-es' : 'en-us',
     });
 

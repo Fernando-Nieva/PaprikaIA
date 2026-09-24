@@ -46,7 +46,7 @@ function isYouTubeUrl(url) {
  * @returns {Object} Tool definition
  */
 function createWebSearchTool(searchManager) {
-  return {
+  const tool = {
     description: 'Busca información en internet. Retorna resultados de búsqueda con título, URL y snippet. Para videos, incluye miniatura.',
     params: {
       query: 'string (término de búsqueda)',
@@ -70,6 +70,9 @@ function createWebSearchTool(searchManager) {
         maxResults,
         category,
       });
+
+      // Store structured results for rich content attachments (VideoCard, etc.)
+      tool.lastResults = Array.isArray(results) ? results : [];
 
       if (results.length === 0) {
         return `No se encontraron resultados para "${query}"`;
@@ -104,6 +107,7 @@ function createWebSearchTool(searchManager) {
       return header + lines.join('\n');
     },
   };
+  return tool;
 }
 
 module.exports = { createWebSearchTool, extractYouTubeId, isYouTubeUrl };

@@ -110,6 +110,16 @@ class SearchManager {
         category: options.category,
         safeSearch: options.safeSearch,
       });
+
+      // Si el proveedor primario no devolvió resultados (p.ej. SearXNG caído),
+      // intentar la cadena de fallback igual que ante una excepción.
+      if (!results || results.length === 0) {
+        const fallbackResult = await this._tryFallback(providerName, query, options);
+        if (fallbackResult) {
+          results = fallbackResult.results;
+          usedProvider = fallbackResult.provider;
+        }
+      }
     } catch (err) {
       console.warn(`[SearchManager] ${providerName} failed: ${err.message}, trying fallback...`);
       const fallbackResult = await this._tryFallback(providerName, query, options);

@@ -63,6 +63,9 @@ class AgenticLoop {
       planningUsed: false,
       decisions: { complete: 0, continue: 0, ask_user: 0, fallback: 0 },
     };
+
+    // Rich content attachments recopilados durante la ejecución (web_search)
+    this._attachments = [];
   }
 
   /**
@@ -89,6 +92,8 @@ class AgenticLoop {
     const startTime = Date.now();
     this.reflection.reset();
     this.progress.reset();
+    this._attachments = [];
+    let usedWebSearch = false;
     this._metrics = {
       totalIterations: 0,
       totalToolCalls: 0,
@@ -229,6 +234,26 @@ class AgenticLoop {
           }
         }
         iterResults = execResults;
+
+        // Generar rich content attachments a partir de resultados de web_search
+        for (const r of iterResults) {
+          if (r && r.tool === 'web_search' && r.success) {
+            usedWebSearch = true;
+            try {
+              const webTool = this.toolExecutor && this.toolExecutor.tools && this.toolExecutor.tools.web_search;
+              const searchResults = (webTool && webTool.lastResults) || [];
+              if (searchResults.length > 0) {
+                const { AttachmentDetector } = require('../web');
+                const atts = new AttachmentDetector().fromSearchResults(searchResults);
+                if (atts.length > 0) {
+                  this._attachments = this._attachments.concat(atts);
+                }
+              }
+            } catch (err) {
+              console.warn(`[AgenticLoop] Rich content generation failed: ${err.message}`);
+            }
+          }
+        }
         // Extract clean text by removing tool call blocks from rawResponse
         cleanText = rawResponse.replace(
           /\[TOOL_CALL\][\s\S]*?\[\/TOOL_CALL\]/g,
@@ -312,8 +337,11 @@ class AgenticLoop {
       };
     }
 
-    // Generate final response if we don't have one
-    if (!currentResponse || finalDecision.decision !== 'complete') {
+    // Generate final response if we don't have one, or if any tool was executed
+    // (so the final answer is always grounded in the real TOOL_RESULTs instead
+    // of the narrative text the model wrote before/between tool calls).
+    let finalStreamed = false;
+    if (!currentResponse || finalDecision.decision !== 'complete' || allToolResults.length > 0) {
       const finalMessages = this._buildFinalMessages(
         context, currentResponse, allToolResults, objective, finalDecision
       );
@@ -322,6 +350,7 @@ class AgenticLoop {
         currentResponse = await llm(finalMessages, onChunk, {
           systemPrompt: systemPrompt + '\n\nGenerá la respuesta final al usuario. No uses herramientas.',
         });
+        finalStreamed = !!onChunk;
       } catch (err) {
         console.error(`[AgenticLoop] Final response error: ${err.message}`);
         if (!currentResponse) {
@@ -343,11 +372,14 @@ class AgenticLoop {
         iterations: this._metrics.totalIterations,
         toolCalls: this._metrics.totalToolCalls,
         planningUsed: this._metrics.planningUsed,
+        usedWebSearch,
+        attachments: this._attachments,
         decision: finalDecision.decision,
         reasoning: finalDecision.reasoning,
         quality: finalDecision.quality,
         duration: Date.now() - startTime,
         actionHistory,
+        finalStreamed,
       },
     };
   }
@@ -369,7 +401,7 @@ class AgenticLoop {
         .join('\n\n');
 
       messages.push({
-        role: 'system',
+        role: 'user',
         content: `Resultados de herramientas:\n${resultsText}\n\nUsá esta información para continuar con el objetivo: "${objective}". No vuelvas a llamar herramientas que ya ejecutaste.`,
       });
     }
@@ -393,14 +425,14 @@ class AgenticLoop {
         .join('\n\n');
 
       messages.push({
-        role: 'system',
+        role: 'user',
         content: `Información recopilada:\n${resultsText}\n\nGenerá la respuesta final al usuario basándote en esta información. Objetivo: "${objective}"`,
       });
     }
 
     if (decision && decision.question) {
       messages.push({
-        role: 'system',
+        role: 'user',
         content: `Necesitás preguntarle al usuario: ${decision.question}`,
       });
     }

@@ -71,6 +71,10 @@ class MessageAnalyzer {
     // Generar reasoning (explicación del análisis)
     const reasoning = this._generateReasoning(trimmed, intent, topic, emotion, entities, importance, shouldRemember);
 
+    // Clasificación de routing — decide qué capacidades del pipeline activar
+    // (determinística, sin LLM; complementa el análisis sin reemplazarlo)
+    const routing = this._classifyRouting(trimmed, lower, intent, topic, emotion, entities, importance);
+
     return {
       rawMessage: trimmed,
       intent,
@@ -82,7 +86,135 @@ class MessageAnalyzer {
       shouldRemember,
       language,
       confidence,
-      reasoning
+      reasoning,
+      routing
+    };
+  }
+
+  /**
+   * Clasifica el mensaje por complejidad y determina qué capacidades del
+   * pipeline deben activarse (gating adaptativo).
+   *
+   * Reglas determinísticas basadas en patrones — NO usa LLM.
+   *
+   * Niveles de complejidad:
+   *  - trivial   → "hola", "jaja", "ok", "gracias" → sin memoria/RAG/grafo/agentic
+   *  - simple    → conversación casual → solo memoria ligera
+   *  - medium    → requiere memoria/contexto → memoria + prompter estándar
+   *  - complex   → razonamiento/herramientas/RAG → pipeline completo
+   *
+   * @param {string} trimmed - Mensaje recortado
+   * @param {string} lower - Mensaje en minúsculas
+   * @param {string} intent - Intención detectada
+   * @param {string} topic - Tema detectado
+   * @param {Object} emotion - Estado emocional
+   * @param {Object} entities - Entidades extraídas
+   * @param {number} importance - Importancia calculada
+   * @returns {Object} { complexity, needsMemory, needsKnowledge, needsRag, needsWeb, needsTools, needsReasoning, needsAgentic }
+   */
+  _classifyRouting(trimmed, lower, intent, topic, emotion, entities, importance) {
+    // ── Detección trivial: saludos, despedidas, risa, confirmaciones cortas ──
+    const TRIVIAL_PATTERNS = [
+      /^(hola|holis|holi|buenas|buenos\s+días|buena(s)?\s+tardes|buenas\s+noches|hey|hey\s+paperla|qué\s+tal|qué\s+hacés)\b/i,
+      /^jajaj?a+/,             // risa
+      /^jejej?e+/,             // risa
+      /^(ok|okei|okey|dale|listo|perfecto|genial|buenísimo|buenisimo|bien|de\s+acuerdo)\b/i,
+      /^(gracias|graciass?|grax|graciela|thx|tks|thank\s+you)\b/i,
+      /^(chau|chao|adios|adiós|hasta\s+luego|nos\s+vemos|me\s+voy)\b/i,
+      /^(no\s+se|nose|ni\s+idea|qué\s+sé\s+yo)$/i,
+      /^[\u{1F000}-\u{1FAFF}\u{2600}-\u{27BF}\u{2B00}-\u{2BFF}\u{FE0F}\u{1F1E6}-\u{1F1FF}]+$/u,
+      /^\.+$|^\!+$|^\?+$/
+    ];
+
+    // Referencia explícita a algo del pasado/del usuario → memoria SIEMPRE
+    const MEMORY_INVOCATION_PATTERNS = [
+      /\b(te\s+acordás|te\s+acuerdas|recordás|recuerdas|recuerdo)\b/i,
+      /\b(qué\s+sabés\s+de|qué\s+sabes\s+de|qué\s+recordás\s+de|qué\s+recuerdas\s+de)\b/i,
+      /\b(hablamos|hablábamos|hablabamos|hablamos\s+de|te\s+conté|te\s+contaba)\b/i,
+      /\b(proyecto|proyecto.*mencion|la\s+vez\s+que|cuando\s+me\s+dijiste|según\s+yo)\b/i,
+      /\b(memor(ia|ias)|recuerdo|recuerdos)\b/i
+    ];
+
+    // Pregunta técnica / conocimiento → RAG + knowledge graph
+    const KNOWLEDGE_PATTERNS = [
+      /^(qué\s+es|quién\s+es|qué\s+son|qué\s+significa|como\s+funciona|cómo\s+funciona|para\s+qué\s+sirve|qué\s+es\s+un|qué\s+es\s+una)\b/i,
+      /\b(explica|explicame|explicá|expliqueme|enseñame|enseñá|tutorial)\b/i,
+      /\b(concepto|arquitectura|framework|libería|library|paquete|dependencia|código|api|endpoint|langchain|ollama|llama|transformers)\b/i,
+      /\b(diferencia\s+entre|comparación|compará|compara)\b/i
+    ];
+
+    // Palabras que indican búsqueda web / actualidad
+    const WEB_PATTERNS = /\b(buscar|busca|buscá|busca\s+en|busca\s+información|actualidad|noticias|precio|cuánto\s+cuesta|cómo\s+se\s+hace|tutorial\s+de|documentación)\b/i;
+
+    // Herramientas / acciones
+    const TOOL_PATTERNS = /\b(abr[eíí]?|abri|creá|crea|guardá|guarda|leé|lee|mostrá|muestra|ejecutá|ejecuta|instalá|instala|borrá|borra|buscá|busca|calculá|calcula|resumí|resume)\b/i;
+
+    // Razonamiento profundo / análisis → agentic loop completo
+    const REASONING_PATTERNS = /\b(analizá|analiza|analiza\s+este|razoná|razona|planificá|planifica|desarrollá|desarrolla|diseñá|diseña|mejorá|mejora|investigá|investiga|optimizá|optimiza|reflexioná|reflexiona|profundizá|profundiza)\b/i;
+
+    // ── Prioridad de decisión ──
+    if (TRIVIAL_PATTERNS.some(p => p.test(trimmed))) {
+      return {
+        complexity: 'trivial',
+        needsMemory: false,
+        needsKnowledge: false,
+        needsRag: false,
+        needsWeb: false,
+        needsTools: false,
+        needsReasoning: false,
+        needsAgentic: false
+      };
+    }
+
+    if (REASONING_PATTERNS.test(trimmed) || importance >= 0.7 || (emotion && emotion.intensity >= 0.8)) {
+      return {
+        complexity: 'complex',
+        needsMemory: true,
+        needsKnowledge: KNOWLEDGE_PATTERNS.some(p => p.test(trimmed)),
+        needsRag: KNOWLEDGE_PATTERNS.some(p => p.test(trimmed)),
+        needsWeb: WEB_PATTERNS.test(trimmed),
+        needsTools: TOOL_PATTERNS.test(trimmed),
+        needsReasoning: true,
+        needsAgentic: true
+      };
+    }
+
+    if (MEMORY_INVOCATION_PATTERNS.some(p => p.test(trimmed)) || intent === 'memory_request') {
+      return {
+        complexity: 'medium',
+        needsMemory: true,
+        needsKnowledge: false,
+        needsRag: false,
+        needsWeb: false,
+        needsTools: false,
+        needsReasoning: false,
+        needsAgentic: false
+      };
+    }
+
+    if (KNOWLEDGE_PATTERNS.some(p => p.test(trimmed))) {
+      return {
+        complexity: 'medium',
+        needsMemory: true,
+        needsKnowledge: true,
+        needsRag: true,
+        needsWeb: WEB_PATTERNS.test(trimmed),
+        needsTools: false,
+        needsReasoning: false,
+        needsAgentic: false
+      };
+    }
+
+    // Default: chit-chat / simple
+    return {
+      complexity: 'simple',
+      needsMemory: true,
+      needsKnowledge: false,
+      needsRag: false,
+      needsWeb: false,
+      needsTools: false,
+      needsReasoning: false,
+      needsAgentic: false
     };
   }
 

@@ -72,6 +72,12 @@ const { CapabilityManager, ModelSelector, setupCapabilities, MODEL_CAPABILITIES 
 const DocumentProcessor = require('./multimodal/DocumentProcessor');
 
 /**
+ * Patrón de mensajes que claramente requieren búsqueda web directa.
+ * Usado como fallback cuando la IA no invoca web_search por sí sola.
+ */
+const NEEDS_WEB = /\b(buscar|busca|buscame|buscá|buscáme|youtube|video|videos|noticias|actualidad|clima|temperatura|precio|cuánto cuesta|reseña|review|opinión|pelicula|serie|anime|música|canción|tutorial|resultado|partido|reddit|twitter|github|stackoverflow|documentacion|docu)\b/i;
+
+/**
  * Default fallback values for each pipeline step.
  * When a step fails, the pipeline continues with these safe defaults.
  */
@@ -102,6 +108,16 @@ const STEP_DEFAULTS = {
   }),
   searchResult: () => ({ memories: [], queryEmbedding: null }),
   rankedContext: () => ({ rankedMemories: [], scoredItems: [] }),
+  routing: () => ({
+    complexity: 'medium',
+    needsMemory: true,
+    needsKnowledge: false,
+    needsRag: false,
+    needsWeb: false,
+    needsTools: false,
+    needsReasoning: false,
+    needsAgentic: false
+  }),
   attention: () => ({ primary: { type: 'general' }, urgency: 'normal', topicShift: false, emotionalEmergency: false }),
   systemPrompt: () => 'Sos Paprika, un asistente IA personal.',
   reflection: () => ({ reasoning: 'step failed', actions: [] }),
@@ -485,14 +501,20 @@ class Pipeline {
     );
     sendProcess('Paso 1/22', `Intención: ${analysis.intent} | Tema: ${analysis.topic} | Confianza: ${(analysis.confidence * 100).toFixed(0)}%`);
 
-    // ─── PASO 2: MemoryClassifier — clasifica recuerdos potenciales ───
+    // ─── PASO 2: MemoryClassifier — clasifica recuerdos potenciales (gated) ───
     sendProcess('Paso 2/22', 'Clasificando recuerdos...');
-    const classifiedMemories = this._safeStep('Paso 2 Classifier', () =>
-      this.classifier.classify(analysis, userId),
-      STEP_DEFAULTS.classifiedMemories(),
-      { intent: analysis.intent }
-    );
-    sendProcess('Paso 2/22', `${classifiedMemories.memories.length} recuerdo(s) clasificado(s) | ${classifiedMemories.discarded.length} descartado(s)`);
+    const routing = analysis.routing || STEP_DEFAULTS.routing();
+    const shouldRunMemory = routing.needsMemory !== false && routing.complexity !== 'trivial';
+    const classifiedMemories = shouldRunMemory
+      ? this._safeStep('Paso 2 Classifier', () =>
+          this.classifier.classify(analysis, userId),
+          STEP_DEFAULTS.classifiedMemories(),
+          { intent: analysis.intent }
+        )
+      : { memories: [], discarded: [], reasoning: 'gated: trivial', gated: true };
+    sendProcess('Paso 2/22', shouldRunMemory
+      ? `${classifiedMemories.memories.length} recuerdo(s) clasificado(s) | ${classifiedMemories.discarded.length} descartado(s)`
+      : `Salteado (trivial) — sin clasificación de recuerdos`);
 
     // ─── PASO 3: GoalEngine — extrae/actualiza objetivos ───
     sendProcess('Paso 3/22', 'Buscando objetivos...');
@@ -528,14 +550,48 @@ class Pipeline {
     sendProcess('Paso 5/22', `Emoción dominante: ${dominantEmotion ? dominantEmotion[0] : 'neutral'} (${dominantEmotion ? (dominantEmotion[1] * 100).toFixed(0) + '%' : '-'})`);
 
     // ─── PASO 6: MemorySearch — recupera candidatos relevantes (5 pools) ───
-    sendProcess('Paso 6/22', 'Buscando recuerdos relevantes...');
+    // Routing adaptativo: si no necesita memoria (mensaje trivial), se usa una
+    // recuperación ligera que NO genera embedding, sólo busca por coincidencia
+    // de entidades/tema. El almacenamiento (Paso 17) corre SIEMPRE. [FASE 3: paralelo]
+    const trivialMemory = routing.complexity === 'trivial' && routing.needsMemory === false;
+    const shouldRunGraph = routing.needsKnowledge || routing.needsRag;
+    sendProcess('Paso 6/22', trivialMemory ? 'Memoria ligera (sin embedding)...' : 'Buscando recuerdos relevantes...');
+    sendProcess('Paso 7/22', shouldRunGraph ? 'Consultando grafo de conocimiento...' : 'Grafo omitido (trivial/sin conocimiento)...');
     if (trace) trace.start('search');
-    const searchResult = await this._safeStepAsync('Paso 6 MemorySearch', () =>
-      this.memorySearch.search(message, userId, { limit: 30, contextTopic: analysis.topic }),
-      STEP_DEFAULTS.searchResult(),
-      { userId, topic: analysis.topic }
-    );
 
+    // FASE 3: PASO 6 (memoria) y PASO 7 (grafo) son independientes — solo dependen de message/routing.
+    // Se lanzan en paralelo con Promise.allSettled; cada tarea conserva su gating propio.
+    const memoryTask = trivialMemory
+      ? this._safeStepAsync('Paso 6 MemorySearch', () =>
+          this.memorySearch.searchLight(message, userId, { limit: 6, topic: analysis.topic }),
+          STEP_DEFAULTS.searchResult(),
+          { userId, topic: analysis.topic, mode: 'light' }
+        )
+      : this._safeStepAsync('Paso 6 MemorySearch', () =>
+          this.memorySearch.search(message, userId, { limit: 30, contextTopic: analysis.topic }),
+          STEP_DEFAULTS.searchResult(),
+          { userId, topic: analysis.topic }
+        );
+
+    const graphTask = shouldRunGraph
+      ? this._safeStepAsync('Paso 7 KnowledgeGraph', () =>
+          Promise.resolve().then(async () => {
+            const knownEntities = cache.getOrSet(
+              'entities:' + userId,
+              () => this.knowledge.getEntitiesByUser(userId, { limit: 20 })
+            );
+            const graphContext = this.graphRetriever.retrieve(message, userId, { limit: 15, depth: 2 });
+            return { knownEntities, graphContext };
+          }),
+          { knownEntities: [], graphContext: { entities: [], relations: [], connections: [] } },
+          { userId }
+        )
+      : Promise.resolve({ knownEntities: [], graphContext: { entities: [], relations: [], connections: [] } });
+
+    const [memoryOutcome, graphOutcome] = await Promise.allSettled([memoryTask, graphTask]);
+
+    // ─── Resultados PASO 6 (en paralelo) ───
+    const searchResult = memoryOutcome.status === 'fulfilled' ? memoryOutcome.value : STEP_DEFAULTS.searchResult();
     // MemorySearch now returns { memories, queryEmbedding }
     const memories = searchResult.memories || searchResult;
     let queryEmbedding = searchResult.queryEmbedding || null;
@@ -548,28 +604,17 @@ class Pipeline {
         console.error('[Pipeline] Fallback embedding generation failed:', err.message);
       }
     }
-    sendProcess('Paso 6/22', `${memories.length} candidato(s) recuperado(s) | embedding: ${queryEmbedding ? 'sí' : 'no'}`);
+    sendProcess('Paso 6/22', '' + memories.length + ' candidato(s) recuperado(s) | embedding: ' + (queryEmbedding ? 'sí' : 'no'));
     if (trace) {
       trace.end('search', { candidates: memories.length, embedding: !!queryEmbedding });
       this.telemetry.counter('memorySearches');
     }
 
-    // ─── PASO 7: KnowledgeGraph + GraphRetriever — grafo de conocimiento ───
-    sendProcess('Paso 7/22', 'Consultando grafo de conocimiento...');
-    let knownEntities = [];
-    let graphContext = { entities: [], relations: [], connections: [] };
-    try {
-      knownEntities = cache.getOrSet(
-        `entities:${userId}`,
-        () => this.knowledge.getEntitiesByUser(userId, { limit: 20 })
-      );
-      // Recuperar subgrafo relevante para el query actual
-      graphContext = this.graphRetriever.retrieve(message, userId, { limit: 15, depth: 2 });
-    } catch (err) {
-      console.error('[Pipeline] Knowledge graph retrieval failed:', err.message);
-    }
-    sendProcess('Paso 7/22', `${knownEntities.length} entidad(es) | ${graphContext.connections.length} conexión(es)`);
-
+    // ─── Resultados PASO 7 (en paralelo) ───
+    const graphValue = graphOutcome.status === 'fulfilled' ? graphOutcome.value : { knownEntities: [], graphContext: { entities: [], relations: [], connections: [] } };
+    const knownEntities = graphValue.knownEntities || [];
+    const graphContext = graphValue.graphContext || { entities: [], relations: [], connections: [] };
+    sendProcess('Paso 7/22', '' + knownEntities.length + ' entidad(es) | ' + graphContext.connections.length + ' conexión(es)');
     // ─── PASO 8: ConflictResolver — detecta y resuelve conflictos ───
     sendProcess('Paso 8/22', 'Detectando conflictos...');
     let conflictResult = { conflicts: [], actions: [], summary: 'No conflicts detected' };
@@ -705,7 +750,9 @@ class Pipeline {
       return chatFn(finalMessages, onChunk, options);
     };
 
-    if (this.createAgenticLoop && this.tools) {
+    // Gate agentic loop por routing (Fase 2): triviales/simples no disparan el agentic loop
+    const agenticRouting = routing || analysis.routing || STEP_DEFAULTS.routing();
+    if (this.createAgenticLoop && this.tools && agenticRouting.needsAgentic !== false && agenticRouting.complexity !== 'trivial') {
       // Agentic loop: planning → execution → reflection cycle (fresh instance per request)
       sendProcess('Paso 14/22', 'Iniciando agentic loop...');
 
@@ -736,9 +783,13 @@ class Pipeline {
       agenticMetadata = agenticResult.metadata;
 
       // ─── Fallback: búsqueda web directa + rich content attachments ───
-      const NEEDS_WEB = /\b(buscar|busca|buscame|buscá|buscáme|youtube|video|videos|noticias|actualidad|clima|temperatura|precio|cuánto cuesta|reseña|review|opinión|pelicula|serie|anime|música|canción|tutorial|resultado|partido|reddit|twitter|github|stackoverflow|documentacion|docu)\b/i;
-      const webSearchUsed = agenticMetadata.toolCalls > 0 && agenticMetadata.fallbackSearch;
-      if (NEEDS_WEB.test(message) && !webSearchUsed) {
+      // Si el agentic loop ya usó web_search, respetamos su respuesta y sus
+      // rich attachments en lugar de reemplazarla con una búsqueda redundante.
+      const agenticSearchedWeb = agenticMetadata?.usedWebSearch === true;
+      const agenticAttachments = (agenticMetadata?.attachments && agenticMetadata.attachments.length > 0)
+        ? agenticMetadata.attachments
+        : [];
+      if (NEEDS_WEB.test(message) && !agenticSearchedWeb) {
         sendProcess('Paso 14/22', 'Búsqueda web directa...');
         try {
           if (onChunk) onChunk('\n🔍 Buscando en internet...\n', 'tool');
@@ -750,11 +801,11 @@ class Pipeline {
             console.log(`[Pipeline] Query original: "${message}" → Limpio: "${cleanQuery}"`);
 
             // Auto-detectar categoría para SearXNG
-            const searchCategory = /\b(video|youtube|ver|tutorial|clase|música|canción|opening|anime|pelicula)\b/i.test(message)
+            const searchCategory = /\b(videos?|youtubes?|ver|tutorial(?:es)?|clases?|mú?sicas?|canciones?|opening|animes?|pel[ií]culas?)\b/i.test(message)
               ? 'videos'
-              : /\b(foto|imagen|picture|wallpaper|fondo)\b/i.test(message)
+              : /\b(fotos?|imágenes?|pictures?|wallpapers?|fondos?)\b/i.test(message)
                 ? 'images'
-                : /\b(noticias|actualidad|última\s+hora)\b/i.test(message)
+                : /\b(noticias?|actualidad|última\s+hora)\b/i.test(message)
                   ? 'news'
                   : undefined;
 
@@ -783,9 +834,15 @@ class Pipeline {
         if (onChunk && rawResponse) {
           onChunk(rawResponse, 'text');
         }
-      } else if (!NEEDS_WEB.test(message)) {
-        // No es búsqueda web — streamear la respuesta del agentic loop
-        if (onChunk && rawResponse) {
+      } else {
+        // El agentic loop ya buscó web (o no es una búsqueda): streamear su
+        // respuesta y emitir los rich attachments que haya generado.
+        if (onChunk && agenticAttachments.length > 0) {
+          onChunk(agenticAttachments, 'attachments');
+        }
+        // Si el agentic loop ya streameó la respuesta final token a token,
+        // no volver a emitirla completa (evita duplicado en el frontend).
+        if (onChunk && rawResponse && !agenticMetadata?.finalStreamed) {
           onChunk(rawResponse, 'text');
         }
       }
@@ -803,12 +860,21 @@ class Pipeline {
     } else if (this.tools) {
       // Legacy tool loop (fallback)
       finalSystemPrompt = finalSystemPrompt + '\n\n' + this.tools.getToolsPrompt();
-      rawResponse = await smartChatFn(workingMessages, onChunk, { systemPrompt: finalSystemPrompt });
+
+      // Generamos SIN streamear: si la respuesta contiene tool calls, el texto crudo
+      // (con marcadores [TOOL:...]) no debe llegar al usuario. Solo se streamea la
+      // respuesta final tras ejecutar las herramientas.
+      rawResponse = await smartChatFn(workingMessages, null, { systemPrompt: finalSystemPrompt });
 
       const MAX_TOOL_ROUNDS = 3;
+      let executedSearch = false;
       for (let round = 0; round < MAX_TOOL_ROUNDS; round++) {
         const toolCalls = this.tools.parseToolCalls(rawResponse);
         if (toolCalls.length === 0) break;
+
+        if (toolCalls.some(tc => tc.name === 'web_search')) {
+          executedSearch = true;
+        }
 
         sendProcess('Tools', `Ejecutando: ${toolCalls.map(t => t.name).join(', ')}`);
         if (onChunk) {
@@ -832,14 +898,59 @@ class Pipeline {
         const toolMessages = [
           ...workingMessages,
           { role: 'assistant', content: cleanText || rawResponse },
-          { role: 'system', content: `Resultados de herramientas:\n${toolResultsText}\n\nAhora respondé al usuario usando esta información. No vuelvas a llamar herramientas que ya ejecutaste.` },
+          // role 'user' (no 'system'): smartChatFn/ollama descartan los mensajes
+          // 'system' intermedios y la respuesta debía terminar en un turno de
+          // usuario, si no, Ollama devolvía vacío y los TOOL_RESULT se perdían.
+          { role: 'user', content: `Resultados de herramientas:\n${toolResultsText}\n\nAhora respondé al usuario usando esta información. No vuelvas a llamar herramientas que ya ejecutaste.` },
         ];
 
-        rawResponse = await smartChatFn(toolMessages, onChunk, { systemPrompt: finalSystemPrompt });
+        rawResponse = await smartChatFn(toolMessages, null, { systemPrompt: finalSystemPrompt });
 
         if (onChunk) {
           onChunk(`\n🔄 Usando: tools (${toolCalls.map(t => t.name).join(', ')})\n`, 'tool');
         }
+      }
+
+      // Fallback: si el mensaje necesita web y la IA no invocó web_search,
+      // buscar directo en SearXNG para no dejar la respuesta sin datos reales.
+      if (!executedSearch && NEEDS_WEB.test(message)) {
+        sendProcess('Paso 14/22', 'Búsqueda web directa (fallback legacy)...');
+        try {
+          if (onChunk) onChunk('\n🔍 Buscando en internet...\n', 'tool');
+          const sm = this.tools && this.tools.searchManager;
+          if (sm) {
+            const cleanQuery = this._extractSearchQuery(message);
+            const searchCategory = /\b(videos?|youtubes?|ver|tutorial(?:es)?|clases?|mú?sicas?|canciones?|opening|animes?|pel[ií]culas?)\b/i.test(message)
+              ? 'videos'
+              : /\b(fotos?|imágenes?|pictures?|wallpapers?|fondos?)\b/i.test(message)
+                ? 'images'
+                : /\b(noticias?|actualidad|última\s+hora)\b/i.test(message)
+                  ? 'news'
+                  : undefined;
+            const searchResult = await sm.search(cleanQuery, { maxResults: 5, category: searchCategory });
+            if (searchResult && searchResult.results && searchResult.results.length > 0) {
+              const detector = new AttachmentDetector();
+              const attachments = detector.fromSearchResults(searchResult.results);
+              rawResponse = `Encontré estos resultados para "${cleanQuery}":`;
+              if (onChunk && attachments.length > 0) {
+                onChunk(attachments, 'attachments');
+              }
+            } else {
+              rawResponse = `No encontré resultados para "${cleanQuery}". Probá con otra búsqueda.`;
+            }
+          }
+        } catch (err) {
+          console.error('[Pipeline] Fallback web search failed:', err.message);
+          rawResponse = `Error al buscar en internet: ${err.message}`;
+        }
+      }
+
+      // Streamear SOLO la respuesta final, sin marcadores de tool calls residuales.
+      if (onChunk && rawResponse) {
+        const finalText = String(rawResponse)
+          .replace(/\[TOOL:\w+\(\{.+?\}\)\]/g, '')
+          .trim();
+        if (finalText) onChunk(finalText, 'text');
       }
     } else {
       rawResponse = await smartChatFn(workingMessages, onChunk, { systemPrompt: finalSystemPrompt });
@@ -1068,9 +1179,9 @@ class Pipeline {
       q = message.replace(/[¿?¡!]/g, '').trim();
     }
 
-    const wantsVideo = /\b(video|youtube|ver|tutorial|clase|música|canción|cancion|opening|anime|pelicula)\b/i.test(message);
-    const wantsImage = /\b(foto|imagen|picture|wallpaper|fondo)\b/i.test(message);
-    const wantsNews = /\b(noticias|actualidad|última\s+hora|noticia)\b/i.test(message);
+    const wantsVideo = /\b(videos?|youtubes?|ver|tutorial(?:es)?|clases?|mú?sicas?|canciones?|opening|animes?|pel[ií]culas?)\b/i.test(message);
+    const wantsImage = /\b(fotos?|imágenes?|pictures?|wallpapers?|fondos?)\b/i.test(message);
+    const wantsNews = /\b(noticias?|actualidad|última\s+hora|noticia)\b/i.test(message);
 
     if (wantsVideo && !/video|youtube|tutorial|anime|pelicula/i.test(q)) q += ' video';
     if (wantsImage && !/imagen|foto|picture/i.test(q)) q += ' imagen';
